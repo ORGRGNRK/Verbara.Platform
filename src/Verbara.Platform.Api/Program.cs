@@ -420,6 +420,7 @@ builder.Services.AddVerbaraOpenTelemetry(b => b
     .AddMeter(Verbara.Platform.Api.Services.RealtimeReconciliationService.MeterName)
     .AddMeter(Verbara.Platform.Api.Services.RecoveryCodeFamilyMetrics.MeterName) // mfa.recovery_codes.{users,redeemed}
     .AddMeter(Verbara.Platform.Api.Services.StasisInboundConsumer.MeterName) // voice.stasis.app_replaced (ADR-0044)
+    .AddMeter(Verbara.Platform.Api.Services.AgentAssist.AgentAssistCallClaimMetrics.MeterName) // platform.agentassist.* (call claim, toggle, recognizer)
     .AddMeter(Verbara.Platform.Api.Services.DialerDispositionMetrics.MeterName).AddMeter(Verbara.Platform.Api.Services.ConversationCloseMetrics.MeterName).AddMeter(Verbara.Platform.Routing.Inbound.RoutingMetrics.MeterName) // dialer.disposition_dispatch.* (D16); conversations.system_closed (inactivity close D13); routing.last_agent (last-agent routing D8)
     .AddDigitalChannelMeters() // channels.delivery_status.unknown_id, whatsapp.webhook.rejected
     .AddCapacityMeters() // Npgsql pool + operation instruments, auth.write.* (measure-api-multi-replica-baseline D1)
@@ -759,20 +760,9 @@ else
 }
 builder.Services.AddSingleton<IJtiRevocationCache, InMemoryJtiRevocationCache>();
 
-// AgentAssist runtime feature toggle (R5.1 Task J) — always registered so the admin
-// endpoint surface resolves regardless of whether Pro.Analytics Postgres is wired.
-// The toggle reports Enabled=false at startup (unless seeded via the "AgentAssist"
-// config section) which causes the engine — when AddProAgentAssist runs below — to
-// skip transcription at each session start.
-// Credentials are persisted through AgentAssistCredentialsProtector (DataProtection
-// purpose "AgentAssist.Credentials"); they never leave the API layer in plaintext.
-// The admin page and a session read IAgentAssistFeatureStore directly; the engine reads
-// IAgentAssistFeatureToggle, the same instance. In memory: one replica only.
-builder.Services.Configure<Verbara.Platform.Core.Configuration.AgentAssistOptions>(
-    builder.Configuration.GetSection("AgentAssist"));
-builder.Services.AddSingleton<Verbara.Platform.Api.Services.AgentAssist.AgentAssistCredentialsProtector>();
-builder.Services.AddSingleton<Verbara.Platform.Api.Services.AgentAssist.IAgentAssistFeatureStore, Verbara.Platform.Api.Services.AgentAssist.InMemoryAgentAssistFeatureToggle>();
-builder.Services.AddSingleton<Verbara.Sdk.Pro.AgentAssist.Features.IAgentAssistFeatureToggle>(sp => sp.GetRequiredService<Verbara.Platform.Api.Services.AgentAssist.IAgentAssistFeatureStore>());
+// Agent Assist feature toggle: always registered so the admin routes resolve. With the core database one state for
+// every replica (PostgresAgentAssistFeatureToggle), else in memory; credentials encrypted (AgentAssistCredentialsProtector).
+builder.Services.AddAgentAssistFeatureStore(builder.Configuration, sharedCoreDataSource);
 
 var jwtKeyDirectory = builder.Configuration["Auth:KeyDirectory"]
     ?? Path.Combine(builder.Environment.ContentRootPath, "data");
@@ -1044,7 +1034,7 @@ if (!string.IsNullOrEmpty(dialerConnectionString))
     builder.Services.AddPlatformDialer(builder.Configuration, ResolveDataSource(dialerConnectionString, "dialer")!);
 
 // ─── Pro.Cluster ─────────────────────────────────────────────────────────────
-var nodeAri = StasisAppNames.NodeOptions(builder.Configuration); // eager: equal app names fail the boot (ADR-0044)
+var nodeAri = StasisAppNames.NodeOptions(builder.Configuration, Environment.MachineName); // eager: equal app names fail the boot (ADR-0044)
 builder.Services.AddVerbaraCluster(c =>
 {
     c.InstanceId = Environment.MachineName;
@@ -1246,11 +1236,9 @@ if (!string.IsNullOrEmpty(analyticsConnectionString))
     // and LiveQueueSnapshotWriter rejects events with reason=missing_tenant.
     builder.Services.AddVerbaraAnalytics().WithSingleTenantMode("default");
     builder.Services.AddProCallAnalytics();
-    builder.Services.AddProAgentAssist(assistBuilder =>
-    {
-        assistBuilder.WithRuntimeFeatureToggle(sp =>
-            sp.GetRequiredService<Verbara.Sdk.Pro.AgentAssist.Features.IAgentAssistFeatureToggle>());
-    });
+    // Agent Assist: the bridge (registered first), the engine, its gate, claim, snoops (in this replica's node app) and recognizer.
+    builder.Services.AddPlatformAgentAssist(builder.Configuration,
+        StasisAppNames.NodeInstance(builder.Configuration, Environment.MachineName), sharedCoreDataSource);
 
     // Pro.Analytics.Live (v1.12.0-pro) — LiveQueueSnapshotWriter hosted service +
     // Postgres-backed ILiveQueueMetricsProvider for QueueMetricsEndpoints. Uses

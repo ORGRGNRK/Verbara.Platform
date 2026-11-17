@@ -88,8 +88,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`GET /api/v1/call-analytics/sentiment/trends` and `/compliance/summary` with a queue return the analyses stored
   after the upgrade for that queue.** They returned none; analyses stored earlier carry no queue and still do not match
   (Verbara.Sdk.Pro `2.27.0-pro`, below).
+- **Each replica's node ARI client registers an app of its own.** The app named by `Asterisk:Ari:NodeApplication`
+  (default `<Asterisk:Ari:Application>-node`, for example `verbara-node`) is now followed by `-` and the replica's
+  machine name, for example `verbara-node-api-7f9c`, so two replicas never register the same app. Agent Assist creates
+  its snoop channels in that app. Anything outside the Platform that looks for the node app by its exact name must match
+  it by prefix. The Api still refuses to start when `Asterisk:Ari:NodeApplication` equals `Asterisk:Ari:Application`,
+  and now also when the name it would register does (the error names both settings and the machine name).
+- **The Agent Assist feature toggle is kept in the database.** With a `Postgres` connection string, the on/off switch,
+  provider and encrypted credentials set through `PUT /api/v1/admin/features/agent-assist` are stored in
+  `agent_assist_feature_state` and shared by every replica, so they survive a restart; the `AgentAssist` configuration
+  section seeds that row until an administrator writes it. Without a database the toggle stays in memory, as before.
 
 ### Fixed
+
+- **Agent Assist suggestions, sentiment, compliance alerts and transcripts reach the agent.** The service that forwards a
+  live session's results to `GET /api/v1/events/stream` was not running, so nothing was delivered. It now starts before
+  the Agent Assist engine, so a session that begins while the Api is still starting is not missed. With several
+  replicas, only the replica that holds the voice AMI connection assists calls, at most one session runs per call (a
+  claim per call in the `Postgres` database), and each session transcribes with the provider and credentials stored at
+  the moment it starts.
+- **Agent Assist sends each snoop's audio to the replica that created it.** The listener uses
+  `AgentAssist:AudioSocket:Port`, and each snoop carries `AgentAssist:AudioSocket:AdvertisedHost` and that port as its
+  audio address, resolved when the first call needs it (`auto`: the replica's own address on its route to Asterisk).
+  When no address is set or `auto` finds no route, the Api still starts; each call is then skipped and counted, and a
+  Warning is logged once.
+- New counters on `/metrics`: `platform_agentassist_call_claim_total{outcome}`,
+  `platform_agentassist_toggle_stale_total{path}` and `platform_agentassist_recognizer_unavailable_total{reason}`.
 
 - `GET /api/v1/analytics/cdr/{sessionId}` always answers `hasTranscript` false. It used to answer true for any call
   with an analysis summary, although no transcript route is served, so a client that followed it got 404.

@@ -7,14 +7,14 @@ namespace Verbara.Platform.Api.Services;
 /// spec <c>voice-stasis-app-ownership</c>). Asterisk hands a Stasis app to exactly one ARI WebSocket, the last one
 /// to register it, so the dialplan's app (<see cref="Consumer"/>) is registered only by the inbound-voice leader's
 /// <see cref="StasisInboundConsumer"/>, and the per-node ARI client of the cluster's Asterisk node registers an app
-/// of its own (<see cref="Node"/>), which nothing in the dialplan targets.
+/// of its own on each replica (<see cref="NodeInstance"/>), which nothing in the dialplan targets.
 /// </summary>
 internal static class StasisAppNames
 {
     /// <summary>The dialplan's app: <c>Stasis(verbara,…)</c> in <c>extensions.conf</c>.</summary>
     public const string ApplicationKey = "Asterisk:Ari:Application";
 
-    /// <summary>The per-node ARI client's app.</summary>
+    /// <summary>The prefix of the per-node ARI client's app (<see cref="NodeInstance"/>).</summary>
     public const string NodeApplicationKey = "Asterisk:Ari:NodeApplication";
 
     private const string BaseUrlKey = "Asterisk:Ari:BaseUrl";
@@ -25,23 +25,46 @@ internal static class StasisAppNames
     public static string Consumer(IConfiguration configuration) =>
         NonBlank(configuration[ApplicationKey]) ?? DefaultApplication;
 
-    /// <summary><c>Asterisk:Ari:NodeApplication</c>, default the dialplan's app followed by <c>-node</c>.</summary>
+    /// <summary>
+    /// <c>Asterisk:Ari:NodeApplication</c>, default the dialplan's app followed by <c>-node</c>: the prefix of the app
+    /// each replica's node client registers (<see cref="NodeInstance"/>).
+    /// </summary>
     public static string Node(IConfiguration configuration) =>
         NonBlank(configuration[NodeApplicationKey]) ?? Consumer(configuration) + NodeSuffix;
 
     /// <summary>
-    /// The per-node ARI client options, or <see langword="null"/> when ARI is not configured. Throws when the two
-    /// app names are equal (compared without regard to case), so the race ADR-0044 closes cannot come back through
+    /// The app this replica's node ARI client registers: <see cref="Node"/> followed by <c>-</c> and
+    /// <paramref name="instanceId"/> (the replica's machine name), so every replica holds an app of its own. Agent
+    /// Assist creates its snoops in this app, so a snoop is always born in the app of the replica that created it.
+    /// </summary>
+    public static string NodeInstance(IConfiguration configuration, string instanceId) =>
+        Node(configuration) + "-" + instanceId;
+
+    /// <summary>
+    /// The per-node ARI client options, registering <see cref="NodeInstance"/>, or <see langword="null"/> when ARI is
+    /// not configured. Throws when the configured node app equals the dialplan's app, or when the name the node client
+    /// registers does (both compared without regard to case), so the race ADR-0044 closes cannot come back through
     /// configuration. <c>Program.cs</c> calls this eagerly, before the host is built.
     /// </summary>
-    public static AriClientOptions? NodeOptions(IConfiguration configuration)
+    public static AriClientOptions? NodeOptions(IConfiguration configuration, string instanceId)
     {
-        var options = Options(configuration, Node(configuration));
-        if (options is not null && string.Equals(options.Application, Consumer(configuration), StringComparison.OrdinalIgnoreCase))
+        ArgumentException.ThrowIfNullOrWhiteSpace(instanceId);
+        var options = Options(configuration, NodeInstance(configuration, instanceId));
+        if (options is null)
+            return null;
+
+        var consumer = Consumer(configuration);
+        if (string.Equals(Node(configuration), consumer, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException(
-                $"{NodeApplicationKey} ('{options.Application}') must differ from {ApplicationKey} " +
-                $"('{Consumer(configuration)}'): only the inbound-voice leader may register the dialplan's Stasis app " +
+                $"{NodeApplicationKey} ('{Node(configuration)}') must differ from {ApplicationKey} " +
+                $"('{consumer}'): only the inbound-voice leader may register the dialplan's Stasis app " +
                 "(Platform/ADR-0044). Unset Asterisk:Ari:NodeApplication to use the default '<Application>-node'.");
+        if (string.Equals(options.Application, consumer, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"The node app this replica registers, {NodeApplicationKey} ('{Node(configuration)}') followed by " +
+                $"'-' and the instance id '{instanceId}', is '{options.Application}', which equals {ApplicationKey} " +
+                $"('{consumer}'): only the inbound-voice leader may register the dialplan's Stasis app " +
+                "(Platform/ADR-0044). Choose an Asterisk:Ari:NodeApplication that is not a prefix of Asterisk:Ari:Application.");
         return options;
     }
 
