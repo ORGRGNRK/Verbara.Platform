@@ -125,7 +125,7 @@ public sealed class TwoHostBackplaneTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Order (design D12; spec audit round 6, F1): 100 transcripts of one session, published back to back on A, reach the
+    /// Order (design D12): 100 transcripts of one session, published back to back on A, reach the
     /// agent's stream on B in publish order, each once. Completeness first, so a loss is never read as a reorder.
     /// </summary>
     [Fact]

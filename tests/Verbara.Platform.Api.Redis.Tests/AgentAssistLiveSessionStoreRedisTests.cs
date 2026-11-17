@@ -148,7 +148,7 @@ public sealed class AgentAssistLiveSessionStoreRedisTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Cross-replica read before the heartbeat (spec audit round 4, F2), for both start-time tenants: replica A files a
+    /// Cross-replica read before the heartbeat, for both start-time tenants: replica A files a
     /// bound session under demo, its call is re-stamped acme, the session emits nothing, and replica B reads at once and
     /// after one 5 s heartbeat of A. With start-time tenant demo the two tenants conflict and the row goes to nobody; with
     /// none, acme owns the session and its row shows acme's conversation, never demo's.

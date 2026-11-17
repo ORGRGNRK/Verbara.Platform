@@ -16,8 +16,8 @@ using Verbara.Sdk.VoiceAi;
 namespace Verbara.Platform.Api.Tests.AgentAssist;
 
 /// <summary>
-/// agent-assist-works-end-to-end task B.2, the session half of B.3's warm-cache scenarios (design D5, D6; spec audit
-/// F3): two replicas over one Testcontainers Postgres with the real migrations, each with its own Data Protection stack
+/// agent-assist-works-end-to-end task B.2, the session half of B.3's warm-cache scenarios (design D5, D6):
+/// two replicas over one Testcontainers Postgres with the real migrations, each with its own Data Protection stack
 /// over the one shared keyring table, as the host configures it. A key saved through one replica is decrypted by the
 /// other's session; a rotation or a switch to off saved through one replica applies to the next session on the other,
 /// whatever that replica's engine path has cached.

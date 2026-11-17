@@ -136,7 +136,7 @@ public sealed class AgentAssistSessionFilingTests : IDisposable
     }
 
     /// <summary>
-    /// The cross-replica read before the heartbeat (spec audit round 4, F2), for both start-time tenants. Host A files a
+    /// The cross-replica read before the heartbeat, for both start-time tenants. Host A files a
     /// bound session under <c>demo</c>, its call is re-stamped <c>acme</c>, the session emits nothing, and the list is
     /// read at once, then after one heartbeat (5 s).
     /// <list type="bullet">
@@ -193,7 +193,7 @@ public sealed class AgentAssistSessionFilingTests : IDisposable
         _store.Writes.Should().Be(0, "an ownerless session is never filed");
     }
 
-    /// <summary>Pro's setup fence (spec audit round 3, F2): SessionEnded right after SessionStarted, nothing between.</summary>
+    /// <summary>Pro's setup fence: SessionEnded right after SessionStarted, nothing between.</summary>
     [Fact]
     public async Task Filing_ShouldLeaveNoRowAndRewriteNothing_WhenTheSessionEndsRightAfterItStarted()
     {

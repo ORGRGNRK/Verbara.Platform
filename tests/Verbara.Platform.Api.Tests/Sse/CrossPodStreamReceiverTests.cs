@@ -34,7 +34,7 @@ public class CrossPodContentDeliveryApiFactory : ContentDeliveryApiFactory
 }
 
 /// <summary>
-/// agent-assist-works-end-to-end (design D12, receiving half; spec audit F1, F4): the four <c>agentassist.*</c> another
+/// agent-assist-works-end-to-end (design D12, receiving half): the four <c>agentassist.*</c> another
 /// replica published reach this replica's live streams through <see cref="CrossPodStreamReceiver"/>, under the same
 /// delivery rule as a local publish, exactly once, and nowhere else. Each envelope is built as <c>RedisEventRelay</c>
 /// builds it, from the payload the publishing replica serialized.
