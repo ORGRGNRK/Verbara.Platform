@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
@@ -10,6 +11,7 @@ using Verbara.Platform.Api.Services.Speech;
 using Verbara.Platform.Api.Tests.Logging;
 using Verbara.Sdk.Audio;
 using Verbara.Sdk.VoiceAi;
+using Verbara.Sdk.VoiceAi.Stt.Deepgram;
 using Verbara.Sdk.VoiceAi.Stt.Whisper;
 using Xunit;
 
@@ -72,7 +74,7 @@ public sealed class SpeechRecognizerFactoryTests
     }
 
     [Theory]
-    [InlineData("deepgram")]
+    [InlineData("Deepgram")]
     [InlineData("azure-whisper")]
     [InlineData("google")]
     [InlineData("Whisper")]
@@ -132,7 +134,7 @@ public sealed class SpeechRecognizerFactoryTests
             new SpeechRecognizerSettings { ProviderId = "whisper", Language = "es", ApiKey = ApiKey, Endpoint = endpoint },
             "qa-stt");
         var refused = Record.Exception(() => factory.Create(
-            new SpeechRecognizerSettings { ProviderId = "deepgram", Language = "es", ApiKey = ApiKey, Endpoint = endpoint },
+            new SpeechRecognizerSettings { ProviderId = "google", Language = "es", ApiKey = ApiKey, Endpoint = endpoint },
             "qa-stt"));
 
         capture.Records.Should().NotBeEmpty("the factory logs what it builds and what it refuses");
@@ -160,12 +162,14 @@ public sealed class SpeechRecognizerFactoryTests
     }
 
     [Fact]
-    public void TryGetMode_ShouldReportWhisperAsBatchAndOnlyMappedProviders_WhenAsked()
+    public void TryGetMode_ShouldReportWhisperAsBatchDeepgramAsStreamingAndOnlyMappedProviders_WhenAsked()
     {
         SpeechRecognizerFactory.TryGetMode("whisper", out var mode).Should().BeTrue();
         mode.Should().Be(SpeechRecognizerMode.Batch);
-        SpeechRecognizerFactory.TryGetMode("deepgram", out _).Should().BeFalse();
-        SpeechRecognizerFactory.MappedProviders.Should().BeEquivalentTo(["whisper"]);
+        SpeechRecognizerFactory.TryGetMode("deepgram", out mode).Should().BeTrue();
+        mode.Should().Be(SpeechRecognizerMode.Streaming);
+        SpeechRecognizerFactory.TryGetMode("google", out _).Should().BeFalse();
+        SpeechRecognizerFactory.MappedProviders.Should().BeEquivalentTo(["whisper", "deepgram"]);
     }
 
     [Fact]
@@ -180,7 +184,104 @@ public sealed class SpeechRecognizerFactoryTests
             new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
 
         provider.GetRequiredService<SpeechRecognizerFactory>()
-            .Should().BeSameAs(provider.GetRequiredService<SpeechRecognizerFactory>());
+            .Should().BeSameAs(provider.GetRequiredService<SpeechRecognizerFactory>())
+            .And.BeSameAs(provider.GetRequiredService<ISpeechRecognizerFactory>());
+    }
+
+    // ---------------------------------------------------------------- deepgram (agent-assist-works-end-to-end B.2)
+
+    [Fact]
+    public async Task Create_ShouldOpenDeepgramAtTheGivenEndpointWithKeyLanguageAndModel_WhenProviderIsDeepgram()
+    {
+        await using var server = await UpgradeCapture.StartAsync();
+        var httpClients = Substitute.For<IHttpClientFactory>();
+        var factory = new SpeechRecognizerFactory(httpClients, NullLogger<SpeechRecognizerFactory>.Instance);
+
+        await using var recognizer = factory.Create(
+            new SpeechRecognizerSettings
+            {
+                ProviderId = "deepgram",
+                Language = "pt",
+                ApiKey = ApiKey,
+                Endpoint = new Uri($"ws://127.0.0.1:{server.Port}/v1/listen"),
+                Model = "nova-3",
+            },
+            "agentassist-stt");
+
+        recognizer.Should().BeOfType<DeepgramSpeechRecognizer>();
+        var act = async () => await DrainAsync(recognizer);
+        await act.Should().ThrowAsync<SpeechProviderFailureException>("the capture answers the upgrade with 401");
+
+        var request = await server.Request;
+        request.Target.Should().StartWith("/v1/listen?");
+        request.Target.Should().Contain("language=pt").And.Contain("model=nova-3");
+        request.Authorization.Should().Be($"Token {ApiKey}");
+        httpClients.DidNotReceiveWithAnyArgs().CreateClient(default!);
+    }
+
+    [Fact]
+    public async Task Create_ShouldOpenDeepgramsListenRoute_WhenTheEndpointNamesAHostOnly()
+    {
+        await using var server = await UpgradeCapture.StartAsync();
+        var factory = new SpeechRecognizerFactory(
+            Substitute.For<IHttpClientFactory>(), NullLogger<SpeechRecognizerFactory>.Instance);
+
+        await using var recognizer = factory.Create(new SpeechRecognizerSettings
+        {
+            ProviderId = "deepgram",
+            Language = "es",
+            ApiKey = ApiKey,
+            Endpoint = new Uri($"ws://127.0.0.1:{server.Port}"),
+        });
+        var act = async () => await DrainAsync(recognizer);
+        await act.Should().ThrowAsync<SpeechProviderFailureException>();
+
+        (await server.Request).Target.Should().StartWith("/v1/listen?", "a host-only endpoint gets Deepgram's live route");
+    }
+
+    [Fact]
+    public void DeepgramOptionsFor_ShouldKeepTheSdkDefaults_WhenNoEndpointAndNoModelAreGiven()
+    {
+        var options = SpeechRecognizerFactory.DeepgramOptionsFor(
+            new SpeechRecognizerSettings { ProviderId = "deepgram", Language = "es", ApiKey = ApiKey });
+
+        options.BaseUri.Should().Be(new DeepgramOptions().BaseUri);
+        options.Model.Should().Be(new DeepgramOptions().Model);
+        options.ApiKey.Should().Be(ApiKey);
+        options.Language.Should().Be("es");
+    }
+
+    [Theory]
+    [InlineData("wss://api.deepgram.com", "wss://api.deepgram.com/v1/listen")]
+    [InlineData("wss://api.deepgram.com/", "wss://api.deepgram.com/v1/listen")]
+    [InlineData("wss://stt.internal.test:8443/v1/listen", "wss://stt.internal.test:8443/v1/listen")]
+    [InlineData("ws://stt.internal.test/custom/route?x=1", "ws://stt.internal.test/custom/route")]
+    public void DeepgramOptionsFor_ShouldUseTheEndpointAsBaseUri_WhenOneIsGiven(string endpoint, string expected)
+    {
+        var options = SpeechRecognizerFactory.DeepgramOptionsFor(new SpeechRecognizerSettings
+        {
+            ProviderId = "deepgram", Language = "es", ApiKey = ApiKey, Endpoint = new Uri(endpoint),
+        });
+
+        options.BaseUri.Should().Be(expected);
+    }
+
+    [Fact]
+    public void Create_ShouldRefuseWithoutNamingTheEndpoint_WhenADeepgramEndpointIsNotAWebSocketUri()
+    {
+        var factory = new SpeechRecognizerFactory(
+            Substitute.For<IHttpClientFactory>(), NullLogger<SpeechRecognizerFactory>.Instance);
+
+        var act = () => factory.Create(new SpeechRecognizerSettings
+        {
+            ProviderId = "deepgram",
+            Language = "es",
+            ApiKey = ApiKey,
+            Endpoint = new Uri($"https://stt-user:{UserInfoSecret}@stt.internal.test/v1/listen"),
+        });
+
+        act.Should().Throw<ArgumentException>().Which.Message.Should().Contain("ws://")
+            .And.NotContain(UserInfoSecret).And.NotContain("stt.internal.test");
     }
 
     private static IHttpClientFactory HttpClientsReturning(HttpMessageHandler handler, string name)
@@ -203,6 +304,72 @@ public sealed class SpeechRecognizerFactoryTests
         await Task.Yield();
         yield return new byte[320];
     }
+
+    /// <summary>
+    /// A TCP listener that reads one HTTP upgrade request, keeps its request target and <c>Authorization</c> header and
+    /// answers 401, so a WebSocket client's real handshake can be observed without a provider.
+    /// </summary>
+    private sealed class UpgradeCapture : IAsyncDisposable
+    {
+        private readonly TcpListener _listener;
+        private readonly Task<CapturedUpgrade> _request;
+
+        private UpgradeCapture(TcpListener listener)
+        {
+            _listener = listener;
+            _request = AcceptOneAsync(listener);
+        }
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+        public Task<CapturedUpgrade> Request => _request.WaitAsync(TimeSpan.FromSeconds(15));
+
+        public static Task<UpgradeCapture> StartAsync()
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            return Task.FromResult(new UpgradeCapture(listener));
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _listener.Stop();
+            _listener.Dispose();
+            try
+            {
+                await _request.ConfigureAwait(false);
+            }
+            catch (SocketException)
+            {
+                // The listener was stopped before any client connected.
+            }
+            catch (ObjectDisposedException)
+            {
+                // The listener was disposed before any client connected.
+            }
+        }
+
+        private static async Task<CapturedUpgrade> AcceptOneAsync(TcpListener listener)
+        {
+            using var client = await listener.AcceptTcpClientAsync();
+            await using var stream = client.GetStream();
+            using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+            var requestLine = await reader.ReadLineAsync() ?? string.Empty;
+            string? authorization = null;
+            while (await reader.ReadLineAsync() is { Length: > 0 } header)
+            {
+                if (header.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase))
+                    authorization = header["Authorization:".Length..].Trim();
+            }
+
+            var reply = Encoding.ASCII.GetBytes("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(reply);
+            var parts = requestLine.Split(' ');
+            return new CapturedUpgrade(parts.Length > 1 ? parts[1] : string.Empty, authorization);
+        }
+    }
+
+    private sealed record CapturedUpgrade(string Target, string? Authorization);
 
     private sealed class CapturingHandler(string responseJson) : HttpMessageHandler
     {

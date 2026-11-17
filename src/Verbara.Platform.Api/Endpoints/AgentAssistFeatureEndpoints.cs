@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using Verbara.Platform.Api.Auth;
 using Verbara.Platform.Api.Services.AgentAssist;
+using Verbara.Platform.Api.Services.Speech;
 using Verbara.Platform.Audit;
 using Verbara.Platform.Core;
 using Verbara.Sdk.Pro.AgentAssist.Features;
@@ -26,13 +27,13 @@ namespace Verbara.Platform.Api.Endpoints;
 internal static class AgentAssistFeatureEndpoints
 {
     /// <summary>
-    /// Providers whose recognizer streams text while the call is still in progress. Only these can
-    /// be enabled: Agent Assist transcribes live calls.
+    /// Providers whose recognizer streams text while the call is still in progress, read from the
+    /// shared recognizer factory's table (the one a session's recognizer is built from). Only these
+    /// can be enabled: Agent Assist transcribes live calls.
     /// </summary>
-    private static readonly HashSet<string> LiveProviders = new(StringComparer.Ordinal)
-    {
-        "deepgram",
-    };
+    private static readonly string[] LiveProviders = [.. SpeechRecognizerFactory.MappedProviders
+        .Where(p => SpeechRecognizerFactory.TryGetMode(p, out var mode) && mode == SpeechRecognizerMode.Streaming)
+        .Order(StringComparer.Ordinal)];
 
     /// <summary>
     /// Providers whose recognizer returns text only after the audio stream ends — on a live call,
@@ -43,7 +44,7 @@ internal static class AgentAssistFeatureEndpoints
         "whisper", "azure-whisper", "google",
     };
 
-    private const string LiveProviderList = "deepgram";
+    private static readonly string LiveProviderList = string.Join(", ", LiveProviders);
 
     /// <summary>The Platform-tenant gate with <c>features:agent-assist:manage</c>.</summary>
     internal static readonly AuthorizationPolicy ManagePolicy = new AuthorizationPolicyBuilder()
@@ -194,7 +195,7 @@ internal static class AgentAssistFeatureEndpoints
             error = $"Provider is required when enabling. Live providers: {LiveProviderList}.";
             return false;
         }
-        if (LiveProviders.Contains(provider))
+        if (LiveProviders.Contains(provider, StringComparer.Ordinal))
         {
             error = null;
             return true;
