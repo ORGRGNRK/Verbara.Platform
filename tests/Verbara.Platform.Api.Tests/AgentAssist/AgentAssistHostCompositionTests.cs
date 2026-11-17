@@ -33,7 +33,7 @@ using SnoopOptions = Verbara.Sdk.Pro.AgentAssist.Options.AgentAssistOptions;
 namespace Verbara.Platform.Api.Tests.AgentAssist;
 
 /// <summary>
-/// agent-assist-works-end-to-end, task B.4 (design D3, D7; spec audit round 8, F1): the Agent Assist block of the real
+/// agent-assist-works-end-to-end, task B.4 (design D3, D7): the Agent Assist block of the real
 /// <c>Program</c>, booted under <c>Testing</c>. The engine and the bridge exist only where the engine's stores do (a
 /// <c>ConnectionStrings:Analytics</c>; the event store and the realtime store migrate it at boot, so it is a Postgres
 /// container shared by the class).
@@ -123,6 +123,7 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
         using var events = new ReplaySignal();
         var audio = new AudioSocketServer(new AudioSocketOptions { Port = 0 }, NullLogger<AudioSocketServer>.Instance);
         var clients = new ConcurrentBag<AudioSocketClient>();
+        var snoopApps = new ConcurrentQueue<string>();
         var recognized = new RecognizerRelease();
         var announced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var watch = new SingleAssignmentDisposable();
@@ -155,7 +156,7 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
                 sessions.Events.Returns(events);
                 sessions.GetById(call.SessionId).Returns(call);
                 services.Replace(ServiceDescriptor.Singleton(sessions));
-                services.Replace(ServiceDescriptor.Singleton(PoolWithAri(audio, clients)));
+                services.Replace(ServiceDescriptor.Singleton(PoolWithAri(audio, clients, snoopApps)));
                 services.Replace(ServiceDescriptor.Singleton(audio));
                 services.Replace(ServiceDescriptor.Singleton<ILicenseGuard>(new AllowEverything()));
                 services.Replace(ServiceDescriptor.Singleton<IAgentAssistActivationGate>(new AlwaysActive()));
@@ -184,6 +185,8 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
                 "session announced before the bridge subscribed");
             (await monitor.ListAsync("demo", CancellationToken.None)).Select(r => r.SessionId).Should().Equal(
                 [call.SessionId], "the bridge wrote the Monitor record of the session announced during startup (design D12)");
+            snoopApps.Should().Equal(["verbara-node-" + Environment.MachineName, "verbara-node-" + Environment.MachineName],
+                "the engine Program.cs hosts asks for both snoops in this replica's own node app, never in another");
         }
         finally
         {
@@ -312,9 +315,11 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
 
     /// <summary>
     /// A node whose ARI client answers the snoop requests and plays Asterisk's dialplan: continuing a snoop connects one
-    /// AudioSocket client to <paramref name="audio"/> with the id the engine set on that snoop.
+    /// AudioSocket client to <paramref name="audio"/> with the id the engine set on that snoop. The app each snoop request
+    /// names is queued in <paramref name="snoopApps"/>.
     /// </summary>
-    private static VerbaraServerPool PoolWithAri(AudioSocketServer audio, ConcurrentBag<AudioSocketClient> clients)
+    private static VerbaraServerPool PoolWithAri(
+        AudioSocketServer audio, ConcurrentBag<AudioSocketClient> clients, ConcurrentQueue<string> snoopApps)
     {
         var uuids = new ConcurrentDictionary<string, Guid>(StringComparer.Ordinal);
         var pool = new VerbaraServerPool(Substitute.For<IAmiConnectionFactory>(), NullLoggerFactory.Instance);
@@ -325,7 +330,11 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
         var channels = Substitute.For<IAriChannelsResource>();
         channels.SnoopAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(),
                 Arg.Any<string?>(), Arg.Any<CancellationToken>())
-            .Returns(c => ValueTask.FromResult(new AriChannel { Id = c.ArgAt<string?>(4) ?? "snoop" }));
+            .Returns(c =>
+            {
+                snoopApps.Enqueue(c.ArgAt<string>(1));
+                return ValueTask.FromResult(new AriChannel { Id = c.ArgAt<string?>(4) ?? "snoop" });
+            });
         channels.SetVariableAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(c =>
             {

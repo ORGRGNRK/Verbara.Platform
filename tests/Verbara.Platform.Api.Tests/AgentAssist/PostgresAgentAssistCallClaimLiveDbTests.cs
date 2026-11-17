@@ -286,7 +286,7 @@ public sealed class PostgresAgentAssistCallClaimLiveDbTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// The one-session promise holds while the holder's claim is younger than 24 h (spec audit round 5, F1). The claim
+    /// The one-session promise holds while the holder's claim is younger than 24 h. The claim
     /// is not renewed, so a session that runs past 24 h loses its call to another owner that handles a connect for it.
     /// This test pins that documented limit: a change that adds renewal turns it red on purpose.
     /// </summary>
@@ -485,7 +485,7 @@ public sealed class PostgresAgentAssistCallClaimLiveDbTests : IAsyncLifetime
     }
 
     // As DispositionDispatchPostgresFixture: every embedded Migrations/*.sql of Storage.Postgres, in ordinal order.
-    private static async Task ApplyMigrationsAsync(NpgsqlDataSource dataSource)
+    internal static async Task ApplyMigrationsAsync(NpgsqlDataSource dataSource)
     {
         var assembly = typeof(Verbara.Platform.Storage.Postgres.ServiceCollectionExtensions).Assembly;
         const string prefix = "Verbara.Platform.Storage.Postgres.Migrations.";
