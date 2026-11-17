@@ -92,20 +92,20 @@ public sealed class InMemoryAgentAssistFeatureToggle : IAgentAssistFeatureToggle
     {
         var creds = new Dictionary<string, string>(StringComparer.Ordinal);
         var provider = opts.Provider?.Trim().ToLowerInvariant();
-        AgentAssistProviderCredentials? src = provider switch
+        (string? ApiKey, string? Endpoint)? src = provider switch
         {
-            "deepgram" => opts.Deepgram,
-            "whisper" => opts.Whisper,
-            "azure-whisper" => opts.Azure,
-            "google" => opts.Google,
+            "deepgram" => (opts.Deepgram.ApiKey, opts.Deepgram.Endpoint),
+            "whisper" => (opts.Whisper.ApiKey, opts.Whisper.Endpoint),
+            "azure-whisper" => (opts.Azure.ApiKey, opts.Azure.Endpoint),
+            "google" => (opts.Google.ApiKey, opts.Google.Endpoint),
             _ => null,
         };
-        if (src is null) return creds;
+        if (src is not { } seed) return creds;
 
-        if (!string.IsNullOrWhiteSpace(src.ApiKey))
-            creds["apiKey"] = src.ApiKey!;
-        if (!string.IsNullOrWhiteSpace(src.Endpoint))
-            creds["endpoint"] = src.Endpoint!;
+        if (!string.IsNullOrWhiteSpace(seed.ApiKey))
+            creds["apiKey"] = seed.ApiKey;
+        if (!string.IsNullOrWhiteSpace(seed.Endpoint))
+            creds["endpoint"] = seed.Endpoint;
         return creds;
     }
 }

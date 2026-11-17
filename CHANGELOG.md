@@ -21,6 +21,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   again on each request, so a renewed licence shows without a restart) or `no_transcript_source`. This release
   configures no transcript source, so the read never answers `available` true yet. The route sits with the other
   analytics reads: supervisors and admins of an operational tenant, with the analytics licence module.
+- Agent Assist configuration keys: `AgentAssist:AudioSocket:Port` (default `9093`) and
+  `AgentAssist:AudioSocket:AdvertisedHost` (a literal host, or `auto` for the replica's own address, resolved at first
+  use) say where Asterisk sends a snoop's audio; `AgentAssist:Deepgram:Model` (optional) and
+  `AgentAssist:Deepgram:Language` (required for a session to be transcribed) configure Deepgram transcription. As
+  environment variables, `AgentAssist__AudioSocket__Port` and so on. The existing `AgentAssist:Deepgram:ApiKey` and
+  `:Endpoint` seed keys are unchanged.
 
 ### Changed — BREAKING
 
