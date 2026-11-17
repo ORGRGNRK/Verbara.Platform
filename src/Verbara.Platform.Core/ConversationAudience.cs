@@ -37,9 +37,12 @@ public sealed record ConversationAudience(string? OwnerAgentId, string? OfferedT
 /// </summary>
 /// <remarks>
 /// <see cref="Audience"/> is never serialized (<c>[JsonIgnore]</c> on every implementer), so the SSE wire shape is
-/// unchanged and no subscriber learns who owns a conversation from it. None of these events is cross-pod
-/// (<see cref="ICrossPodEvent"/>): one that became so would arrive on another replica with <see cref="ConversationAudience.None"/>
-/// and reach only the readers of every conversation, so a guard test fails until the backplane payload carries the audience.
+/// unchanged and no subscriber learns who owns a conversation from it. A cross-pod event (<see cref="ICrossPodEvent"/>)
+/// is decoded on another replica from its payload, so it keeps its audience only when the audience is computed from
+/// serialized members: the four <c>agentassist.*</c> compute it from <c>AgentId</c> and are cross-pod. The audience of
+/// <c>conversation.message</c> is read when it is published and is not on the wire, so a decoded copy would have
+/// <see cref="ConversationAudience.None"/> and reach only the readers of every conversation; a guard test fails if it is
+/// marked cross-pod.
 /// </remarks>
 public interface IConversationContentEvent
 {

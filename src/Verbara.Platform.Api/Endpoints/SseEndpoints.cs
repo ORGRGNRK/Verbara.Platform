@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Verbara.Platform.Api.Endpoints.Shared;
 using Verbara.Platform.Api.Serialization;
+using Verbara.Platform.Api.Services.Push;
 using Verbara.Platform.Core;
 using Verbara.Platform.Core.Push;
 using Verbara.Platform.Identity;
@@ -29,6 +30,7 @@ internal static partial class SseEndpoints
         [FromServices] IAgentStore agentStore,
         [FromServices] LiveConnectionRegistry liveConnections,
         [FromServices] TimeProvider time,
+        [FromServices] CrossPodStreamFeed crossPodFeed,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
@@ -112,7 +114,9 @@ internal static partial class SseEndpoints
             FullMode = BoundedChannelFullMode.DropOldest
         });
 
-        using var subscription = eventBus.Events
+        // Local events and the events another replica published for the live streams (design D12) pass the same filter:
+        // the audience rule is one rule, applied to both sources.
+        using var subscription = eventBus.Events.Merge(crossPodFeed.Events)
             // The revocation signal ends streams (via the registry above); it is never content.
             .Where(e => e is not UserAccessRevokedEvent && deliveryFilter.IsDeliverableToSubscriber(
                 e,

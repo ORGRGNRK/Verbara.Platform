@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Verbara.Platform.Api.Endpoints.Shared;
 using Verbara.Platform.Api.Serialization;
 using Verbara.Platform.Core;
@@ -208,10 +209,26 @@ public sealed class ConversationContentDeliveryRuleTests
 
     // ═══ guard: a content event never crosses pods without its audience ══════════
 
-    /// <summary>Whether the backplane payload of <paramref name="type"/> carries its audience.</summary>
-    private static bool BackplaneCarriesTheAudience(Type type) =>
-        PlatformPushJsonContext.Default.GetTypeInfo(type) is { } info
-        && info.Properties.Any(p => p.Name == nameof(IConversationContentEvent.Audience));
+    /// <summary>
+    /// Whether <paramref name="sample"/> crosses pods with its audience (agent-assist-works-end-to-end, design D12):
+    /// serialized and decoded through <paramref name="context"/>, the decoded copy's audience equals the original's and
+    /// is not <see cref="ConversationAudience.None"/>. No type info in the context is "not carried", never a skip: the
+    /// backplane would send such an event with an empty payload.
+    /// </summary>
+    internal static bool BackplaneCarriesTheAudience(JsonSerializerContext context, PlatformEvent sample)
+    {
+        if (context.GetTypeInfo(sample.GetType()) is not { } info)
+            return false;
+
+        var original = ((IConversationContentEvent)sample).Audience;
+        var decoded = JsonSerializer.Deserialize(JsonSerializer.Serialize(sample, info), info) as IConversationContentEvent;
+        return decoded is not null && decoded.Audience == original && decoded.Audience != ConversationAudience.None;
+    }
+
+    /// <summary>One event of <paramref name="type"/> whose audience names an agent.</summary>
+    private static PlatformEvent WithANamedAgent(Type type) =>
+        AgentAssistEvents(NamedAgent).Append(Message(ConversationAudience.ForAgent(NamedAgent))).SingleOrDefault(e => e.GetType() == type)
+        ?? throw new InvalidOperationException($"add a sample of {type.Name} with a named agent to this guard");
 
     [Fact]
     public void EveryCrossPodContentEvent_ShouldCarryItsAudienceInTheBackplanePayload_WhenItIsCrossPod()
@@ -220,12 +237,32 @@ public sealed class ConversationContentDeliveryRuleTests
             .Where(t => t.IsAssignableTo(typeof(IConversationContentEvent)) && t.IsAssignableTo(typeof(ICrossPodEvent)))
             .ToList();
 
-        crossPodContent.Where(t => !BackplaneCarriesTheAudience(t)).Select(t => t.Name).Should().BeEmpty(
-            "a content event that crosses pods without its audience would reach only the readers on other replicas " +
-            "(design D17, Multi-replica): carry the audience in the PlatformPushJsonContext payload deliberately");
+        crossPodContent.Should().HaveCount(4, "the four agentassist.* events are cross-pod (design D12)");
+        crossPodContent.Where(t => !BackplaneCarriesTheAudience(PlatformPushJsonContext.Default, WithANamedAgent(t)))
+            .Select(t => t.Name).Should().BeEmpty(
+                "a content event that crosses pods without its audience would reach only the readers on other replicas " +
+                "(design D17, Multi-replica): its audience must be rebuilt from the members the PlatformPushJsonContext payload carries");
+    }
 
-        // The guard bites: a content event's payload today has no audience, so marking one cross-pod would fail above.
-        BackplaneCarriesTheAudience(typeof(ConversationMessageEvent)).Should().BeFalse();
+    [Fact]
+    public void BackplaneCarriesTheAudience_ShouldBeFalse_WhenTheEventHasNoTypeInfoInTheContext()
+    {
+        PlatformPushJsonContext.Default.GetTypeInfo(typeof(ConversationMessageEvent)).Should().BeNull("precondition: not registered");
+
+        BackplaneCarriesTheAudience(PlatformPushJsonContext.Default, Message(ConversationAudience.ForAgent(NamedAgent)))
+            .Should().BeFalse("an event the backplane cannot serialize arrives with an empty payload and no audience");
+    }
+
+    [Fact]
+    public void BackplaneCarriesTheAudience_ShouldBeFalse_WhenAConversationMessageIsRegistered()
+    {
+        var sample = Message(ConversationAudience.ForAgent(NamedAgent));
+        var info = ConversationMessageTestJsonContext.Default.ConversationMessageEvent;
+
+        JsonSerializer.Deserialize(JsonSerializer.Serialize(sample, info), info)!.Audience.Should().Be(ConversationAudience.None,
+            "the audience of conversation.message is read when it is published and is not on the wire");
+        BackplaneCarriesTheAudience(ConversationMessageTestJsonContext.Default, sample).Should().BeFalse(
+            "registering conversation.message in the backplane context must not silence the guard");
     }
 
     // ═══ the wire is byte-identical (no audience member) ══════════════════════════
@@ -293,3 +330,11 @@ public sealed class ConversationContentDeliveryRuleTests
         Wire(stamped with { Audience = ConversationAudience.None }).Should().Be(Wire(stamped));
     }
 }
+
+/// <summary>
+/// A source-generated context like <see cref="PlatformPushJsonContext"/> (same options) that registers
+/// <see cref="ConversationMessageEvent"/>, so the backplane guard's second negative runs a real round trip.
+/// </summary>
+[JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(ConversationMessageEvent))]
+internal sealed partial class ConversationMessageTestJsonContext : JsonSerializerContext;

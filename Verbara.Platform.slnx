@@ -67,6 +67,7 @@
     <Project Path="tests/Verbara.Platform.Media.Tests/Verbara.Platform.Media.Tests.csproj" />
     <Project Path="tests/Verbara.Platform.Storage.InMemory.Tests/Verbara.Platform.Storage.InMemory.Tests.csproj" />
     <Project Path="tests/Verbara.Platform.Storage.Postgres.Tests/Verbara.Platform.Storage.Postgres.Tests.csproj" />
+    <Project Path="tests/Verbara.Platform.Api.Redis.Tests/Verbara.Platform.Api.Redis.Tests.csproj" />
     <Project Path="tests/Verbara.Platform.Api.Tests/Verbara.Platform.Api.Tests.csproj" />
     <Project Path="tests/Verbara.Platform.Mail.Tests/Verbara.Platform.Mail.Tests.csproj" />
     <Project Path="tests/Verbara.Platform.Realtime.Tests/Verbara.Platform.Realtime.Tests.csproj" />

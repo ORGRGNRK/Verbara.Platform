@@ -74,15 +74,17 @@ internal static class SupervisorEndpoints
         HttpContext context,
         [FromServices] IConversationStore conversations,
         [FromServices] IAgentStore agents,
-        [FromServices] IAgentAssistLiveSessions liveSessions,
+        [FromServices] IAgentAssistLiveSessionStore liveSessionStore,
         CancellationToken ct)
     {
         var tenantId = GetTenantId(context);
         if (await RefuseUnlessReadsAllAsync(context, tenantId, agents, ct) is { } refusal)
             return refusal;
 
-        var sessions = LiveSessionsOf(liveSessions, tenantId).Select(s => (s.SessionId, s.Call)).ToList();
-        return TypedResults.Ok(await ToActiveSessionsAsync(sessions, tenantId, conversations, ct));
+        // agent-assist-works-end-to-end (design D12): the records filed under the caller's tenant, shared by every replica
+        // when Redis is configured; this replica's own sessions otherwise.
+        var records = await liveSessionStore.ListAsync(tenantId.Value, ct);
+        return TypedResults.Ok(await ToActiveSessionsAsync(records, tenantId, conversations, ct));
     }
 
     /// <summary>
@@ -102,7 +104,7 @@ internal static class SupervisorEndpoints
     /// lookup <c>AgentAssistBridge</c> runs — or null when none resolves there.
     /// </summary>
     internal static async Task<ActiveSessionDto[]> ToActiveSessionsAsync(
-        IReadOnlyList<(string SessionId, Verbara.Sdk.Sessions.CallSession? Call)> sessions,
+        IReadOnlyList<LiveSessionRecord> sessions,
         TenantId callerTenant,
         IConversationStore conversations,
         CancellationToken ct)
@@ -110,17 +112,17 @@ internal static class SupervisorEndpoints
         var dtos = new ActiveSessionDto[sessions.Count];
         for (var i = 0; i < sessions.Count; i++)
         {
-            var (sessionId, cs) = sessions[i];
+            var record = sessions[i];
             string? conversationId = null;
-            if (!string.IsNullOrEmpty(cs?.LinkedId))
-                conversationId = (await conversations.FindByVoiceLinkedIdAsync(callerTenant, cs.LinkedId, ct))?.ConversationId.Value;
+            if (!string.IsNullOrEmpty(record.LinkedId))
+                conversationId = (await conversations.FindByVoiceLinkedIdAsync(callerTenant, record.LinkedId, ct))?.ConversationId.Value;
 
             dtos[i] = new ActiveSessionDto(
-                SessionId: sessionId,
-                AgentId: cs?.AgentId,
-                QueueName: cs?.QueueName,
-                CallerIdNum: cs?.CallerIdNum,
-                ConnectedAt: cs?.ConnectedAt,
+                SessionId: record.SessionId,
+                AgentId: record.AgentId,
+                QueueName: record.QueueName,
+                CallerIdNum: record.CallerIdNum,
+                ConnectedAt: record.ConnectedAt,
                 ConversationId: conversationId);
         }
 

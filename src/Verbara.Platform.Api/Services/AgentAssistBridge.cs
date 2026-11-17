@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Conversations;
 using Verbara.Platform.Core;
 using Verbara.Sdk.Pro.AgentAssist.Engine;
@@ -11,7 +12,7 @@ namespace Verbara.Platform.Api.Services;
 /// Bridges <see cref="AgentAssistSupervisor"/> observable streams into
 /// <see cref="PlatformEventBus"/> so agent assist events flow out via SSE.
 /// </summary>
-public sealed partial class AgentAssistBridge : IHostedService, IDisposable
+internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
 {
     /// <summary>
     /// Keyed-service name for the per-event <see cref="ResiliencePolicy"/> that wraps each
@@ -25,9 +26,14 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
     private readonly IConversationStore _conversationStore;
     private readonly ResiliencePolicy _policy;
     private readonly ILogger<AgentAssistBridge> _logger;
+    private readonly IAgentAssistLiveSessionStore? _liveSessionStore;
+    private readonly TimeProvider _time;
 
     // Per-session composite subscription (4 observables per session)
     private readonly ConcurrentDictionary<string, IDisposable> _sessionSubs = new();
+
+    // Per-session Monitor record (design D12), only when the list is shared between replicas.
+    private readonly ConcurrentDictionary<string, AgentAssistSessionFiling> _filings = new();
 
     private IDisposable? _startedSub;
     private IDisposable? _endedSub;
@@ -37,13 +43,17 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
         PlatformEventBus eventBus,
         IConversationStore conversationStore,
         ILogger<AgentAssistBridge> logger,
-        [FromKeyedServices(ResiliencePolicyKey)] ResiliencePolicy? policy = null)
+        [FromKeyedServices(ResiliencePolicyKey)] ResiliencePolicy? policy = null,
+        IAgentAssistLiveSessionStore? liveSessionStore = null,
+        TimeProvider? time = null)
     {
         _supervisor = supervisor;
         _eventBus = eventBus;
         _conversationStore = conversationStore;
         _logger = logger;
         _policy = policy ?? ResiliencePolicy.NoOp;
+        _liveSessionStore = liveSessionStore is { IsShared: true } ? liveSessionStore : null;
+        _time = time ?? TimeProvider.System;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -80,7 +90,20 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
             // mutable local lazily at emission time, so reassigning it post-await is picked up.
             var conversationId = string.Empty;
 
+            // The Monitor record (design D12): filed under the session's owner tenant, re-evaluated on each event below,
+            // at each heartbeat and at each bind check, and removed at the end. Created before the first await, like the
+            // subscriptions, so a SessionEnded always finds it.
+            AgentAssistSessionFiling? filing = null;
+            if (_liveSessionStore is not null)
+            {
+                filing = AgentAssistSessionFiling.Start(
+                    sessionId, session.TenantId, callSession, _liveSessionStore, _time, _logger);
+                _filings[sessionId] = filing;
+            }
+
             var suggestionSub = session.Suggestions.Subscribe(s =>
+            {
+                filing?.OnEmission();
                 _ = PublishWithPolicyAsync(
                     sessionId,
                     () => _eventBus.Publish(new AgentAssistSuggestionEvent(
@@ -93,9 +116,12 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
                         s.Priority.ToString(),
                         s.Source.ToString(),
                         s.TriggerPhrase)),
-                    Log.PublishSuggestionFailed));
+                    Log.PublishSuggestionFailed);
+            });
 
             var sentimentSub = session.Sentiment.Subscribe(r =>
+            {
+                filing?.OnEmission();
                 _ = PublishWithPolicyAsync(
                     sessionId,
                     () => _eventBus.Publish(new AgentAssistSentimentEvent(
@@ -107,9 +133,12 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
                         r.Score,
                         r.Label.ToString(),
                         r.TriggerWords)),
-                    Log.PublishSentimentFailed));
+                    Log.PublishSentimentFailed);
+            });
 
             var complianceSub = session.ComplianceAlerts.Subscribe(a =>
+            {
+                filing?.OnEmission();
                 _ = PublishWithPolicyAsync(
                     sessionId,
                     () => _eventBus.Publish(new AgentAssistComplianceAlertEvent(
@@ -120,9 +149,12 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
                         a.RuleId,
                         a.Phrase,
                         a.Severity.ToString())),
-                    Log.PublishComplianceAlertFailed));
+                    Log.PublishComplianceAlertFailed);
+            });
 
             var transcriptSub = session.Transcripts.Subscribe(t =>
+            {
+                filing?.OnEmission();
                 _ = PublishWithPolicyAsync(
                     sessionId,
                     () => _eventBus.Publish(new AgentAssistTranscriptEvent(
@@ -133,7 +165,8 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
                         t.Speaker.ToString(),
                         t.Text,
                         IsFinal: true)),
-                    Log.PublishTranscriptFailed));
+                    Log.PublishTranscriptFailed);
+            });
 
             // Combine all 4 subscriptions into a single disposable so cleanup is atomic. Stored BEFORE
             // the await below so a concurrent OnSessionEnded can always find + dispose it.
@@ -163,6 +196,8 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
     {
         if (_sessionSubs.TryRemove(session.SessionId, out var subs))
             subs.Dispose();
+        if (_filings.TryRemove(session.SessionId, out var filing))
+            _ = filing.EndAsync();
     }
 
     /// <summary>
@@ -215,6 +250,12 @@ public sealed partial class AgentAssistBridge : IHostedService, IDisposable
             subs.Dispose();
 
         _sessionSubs.Clear();
+
+        // The records are left to expire (design D12): this replica stops, and its heartbeats with it.
+        foreach (var filing in _filings.Values)
+            filing.Dispose();
+
+        _filings.Clear();
     }
 
     private static partial class Log

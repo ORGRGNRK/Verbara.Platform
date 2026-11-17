@@ -27,6 +27,10 @@ internal static partial class RemoteEventDispatcherLog
     [LoggerMessage(EventId = 3103, Level = LogLevel.Warning,
         Message = "[REMOTE-DISPATCH] Failed to deserialise {EventType} payload: {Reason}")]
     public static partial void DeserialiseFailed(ILogger logger, string eventType, string reason);
+
+    [LoggerMessage(EventId = 3104, Level = LogLevel.Debug,
+        Message = "[REMOTE-DISPATCH] {EventType} from origin={OriginNodeId} is for the Api's live streams; acknowledged, not re-published")]
+    public static partial void Acknowledged(ILogger logger, string eventType, string? originNodeId);
 }
 
 /// <summary>
@@ -104,6 +108,15 @@ internal sealed class RemoteEventDispatcher : IHostedService
 
     private void Dispatch(RemotePushEvent envelope)
     {
+        // Api-only cross-pod events: nothing in this process consumes them, and a typed copy on this bus would be
+        // forwarded back onto the backplane by this process's relay (with an empty payload, since Realtime registers no
+        // payload serializer), once per Realtime replica per event. So they are acknowledged and dropped here.
+        if (AcknowledgedOnly.ContainsKey(envelope.OriginalEventType))
+        {
+            RemoteEventDispatcherLog.Acknowledged(_logger, envelope.OriginalEventType, envelope.SourceNodeId);
+            return;
+        }
+
         if (envelope.RawPayload.Length == 0)
         {
             RemoteEventDispatcherLog.EmptyPayload(_logger, envelope.OriginalEventType);
@@ -137,11 +150,26 @@ internal sealed class RemoteEventDispatcher : IHostedService
             [UserAccessRevokedEvent.EventTypeName] = PlatformPushJsonContext.Default.UserAccessRevokedEvent,
         }.ToFrozenDictionary();
 
-    /// <summary>The CLR event types this dispatcher decodes cross-pod — derived from
-    /// <see cref="Handlers"/> (single source of truth). The cross-pod guard test asserts this
-    /// equals the set of <c>ICrossPodEvent</c> implementers and the PlatformPushJsonContext set.</summary>
+    /// <summary>
+    /// The cross-pod events only the Api's live streams consume (the four <c>agentassist.*</c>, received on each Api
+    /// replica by <c>CrossPodStreamReceiver</c>). This dispatcher handles them by acknowledging them: it never decodes or
+    /// re-publishes one.
+    /// </summary>
+    private static readonly FrozenDictionary<string, Type> AcknowledgedOnly =
+        new Dictionary<string, Type>
+        {
+            ["agentassist.suggestion"] = typeof(AgentAssistSuggestionEvent),
+            ["agentassist.sentiment"] = typeof(AgentAssistSentimentEvent),
+            ["agentassist.compliance_alert"] = typeof(AgentAssistComplianceAlertEvent),
+            ["agentassist.transcript"] = typeof(AgentAssistTranscriptEvent),
+        }.ToFrozenDictionary();
+
+    /// <summary>The CLR event types this dispatcher handles cross-pod — derived from
+    /// <see cref="Handlers"/> (decoded and re-published) and <see cref="AcknowledgedOnly"/> (single source of truth).
+    /// The cross-pod guard test asserts this equals the set of <c>ICrossPodEvent</c> implementers and the
+    /// PlatformPushJsonContext set.</summary>
     internal static readonly IReadOnlySet<Type> HandledEventTypes =
-        Handlers.Values.Select(ti => ti.Type).ToFrozenSet();
+        Handlers.Values.Select(ti => ti.Type).Concat(AcknowledgedOnly.Values).ToFrozenSet();
 
     private void DecodeAndPublish(RemotePushEvent envelope, JsonTypeInfo typeInfo)
     {

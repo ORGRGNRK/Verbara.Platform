@@ -1,0 +1,178 @@
+using System.Globalization;
+using StackExchange.Redis;
+using Verbara.Sdk.Sessions;
+
+namespace Verbara.Platform.Api.Services.AgentAssist;
+
+/// <summary>
+/// One live Agent Assist session as the Monitor list reads it (agent-assist-works-end-to-end, design D12): the tenant it
+/// is filed under and the call members the list shows. The conversation is not stored: the list resolves it by
+/// <see cref="LinkedId"/> in the caller's tenant when it is read, so a row can never carry a conversation of a tenant it
+/// is no longer filed under.
+/// </summary>
+internal sealed record LiveSessionRecord(
+    string SessionId,
+    string OwnerTenant,
+    string? AgentId,
+    string? QueueName,
+    string? CallerIdNum,
+    DateTimeOffset? ConnectedAt,
+    string? LinkedId)
+{
+    /// <summary>The record of session <paramref name="sessionId"/> on <paramref name="call"/>, filed under <paramref name="ownerTenant"/>.</summary>
+    public static LiveSessionRecord Of(string sessionId, string ownerTenant, CallSession? call) =>
+        new(sessionId, ownerTenant, call?.AgentId, call?.QueueName, call?.CallerIdNum, call?.ConnectedAt, call?.LinkedId);
+}
+
+/// <summary>
+/// Where the Monitor list of live Agent Assist sessions is kept (design D12). The engine's replica files and removes each
+/// session's record (<see cref="AgentAssistSessionFiling"/>); any replica lists a tenant's records.
+/// </summary>
+internal interface IAgentAssistLiveSessionStore
+{
+    /// <summary>
+    /// Whether <see cref="FileAsync"/> and <see cref="RemoveAsync"/> write anything. <see langword="false"/> for the
+    /// in-process store, which reads the engine's own registry instead.
+    /// </summary>
+    bool IsShared { get; }
+
+    /// <summary>Files <paramref name="record"/> under its owner tenant until <paramref name="expiresAt"/>, replacing the previous copy.</summary>
+    Task FileAsync(LiveSessionRecord record, DateTimeOffset expiresAt, CancellationToken ct);
+
+    /// <summary>Removes the record of <paramref name="sessionId"/> filed under <paramref name="ownerTenant"/>, if any.</summary>
+    Task RemoveAsync(string ownerTenant, string sessionId, CancellationToken ct);
+
+    /// <summary>The unexpired records filed under <paramref name="tenant"/>.</summary>
+    Task<IReadOnlyList<LiveSessionRecord>> ListAsync(string tenant, CancellationToken ct);
+}
+
+/// <summary>
+/// The list read on this replica only, when no Redis is configured (one Api replica): the engine's live sessions, each
+/// owned by <see cref="AgentAssistLiveSessions.OwnerTenantOf"/> recomputed on every read. Writes are not needed.
+/// </summary>
+internal sealed class InProcessAgentAssistLiveSessionStore(IAgentAssistLiveSessions liveSessions) : IAgentAssistLiveSessionStore
+{
+    /// <inheritdoc />
+    public bool IsShared => false;
+
+    /// <inheritdoc />
+    public Task FileAsync(LiveSessionRecord record, DateTimeOffset expiresAt, CancellationToken ct) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task RemoveAsync(string ownerTenant, string sessionId, CancellationToken ct) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<LiveSessionRecord>> ListAsync(string tenant, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<LiveSessionRecord>>(
+        [
+            .. liveSessions.Snapshot()
+                .Where(s => string.Equals(s.OwnerTenant, tenant, StringComparison.Ordinal))
+                .Select(s => LiveSessionRecord.Of(s.SessionId, tenant, s.Call)),
+        ]);
+}
+
+/// <summary>
+/// The list every replica reads, kept in Redis (design D12). Each tenant has a sorted set of its session ids scored by
+/// expiry (Unix milliseconds) and each session a hash with a time to live. A reader drops the members whose expiry has
+/// passed, then reads the hashes, so a record outlives its last heartbeat by at most <see cref="AgentAssistSessionFiling.RecordTtl"/>
+/// on the index's clock, whatever Redis's own expiry does.
+/// </summary>
+internal sealed class RedisAgentAssistLiveSessionStore(IConnectionMultiplexer redis, TimeProvider time) : IAgentAssistLiveSessionStore
+{
+    internal const string KeyPrefix = "verbara:agentassist:live";
+
+    private static readonly RedisValue AgentIdField = "agentId";
+    private static readonly RedisValue QueueNameField = "queueName";
+    private static readonly RedisValue CallerIdNumField = "callerIdNum";
+    private static readonly RedisValue ConnectedAtField = "connectedAt";
+    private static readonly RedisValue LinkedIdField = "linkedId";
+
+    /// <inheritdoc />
+    public bool IsShared => true;
+
+    internal static RedisKey IndexKey(string tenant) => $"{KeyPrefix}:{{{tenant}}}:index";
+
+    internal static RedisKey RecordKey(string tenant, string sessionId) => $"{KeyPrefix}:{{{tenant}}}:session:{sessionId}";
+
+    /// <inheritdoc />
+    public async Task FileAsync(LiveSessionRecord record, DateTimeOffset expiresAt, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        var ttl = expiresAt - time.GetUtcNow();
+        if (ttl <= TimeSpan.Zero)
+            ttl = TimeSpan.FromMilliseconds(1);
+
+        var key = RecordKey(record.OwnerTenant, record.SessionId);
+        var index = IndexKey(record.OwnerTenant);
+        var db = redis.GetDatabase();
+        var tx = db.CreateTransaction();
+        _ = tx.KeyDeleteAsync(key);
+        _ = tx.HashSetAsync(key, [.. FieldsOf(record)]);
+        _ = tx.KeyExpireAsync(key, ttl);
+        _ = tx.SortedSetAddAsync(index, record.SessionId, expiresAt.ToUnixTimeMilliseconds());
+        // Every record lives RecordTtl past its last filing, so the index outlives each of its members.
+        _ = tx.KeyExpireAsync(index, ttl);
+        await tx.ExecuteAsync().WaitAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(string ownerTenant, string sessionId, CancellationToken ct)
+    {
+        var db = redis.GetDatabase();
+        var tx = db.CreateTransaction();
+        _ = tx.SortedSetRemoveAsync(IndexKey(ownerTenant), sessionId);
+        _ = tx.KeyDeleteAsync(RecordKey(ownerTenant, sessionId));
+        await tx.ExecuteAsync().WaitAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<LiveSessionRecord>> ListAsync(string tenant, CancellationToken ct)
+    {
+        var db = redis.GetDatabase();
+        var index = IndexKey(tenant);
+        var now = time.GetUtcNow().ToUnixTimeMilliseconds();
+        await db.SortedSetRemoveRangeByScoreAsync(index, double.NegativeInfinity, now).WaitAsync(ct).ConfigureAwait(false);
+        var ids = await db.SortedSetRangeByScoreAsync(index, now, double.PositiveInfinity, Exclude.Start).WaitAsync(ct).ConfigureAwait(false);
+
+        var records = new List<LiveSessionRecord>(ids.Length);
+        foreach (var sessionId in ids.Select(id => id.ToString()))
+        {
+            var fields = await db.HashGetAllAsync(RecordKey(tenant, sessionId)).WaitAsync(ct).ConfigureAwait(false);
+            if (fields.Length == 0)
+                continue;   // the hash expired between the index read and this one
+
+            var values = fields.ToDictionary(f => f.Name, f => f.Value);
+            records.Add(new LiveSessionRecord(
+                sessionId,
+                tenant,
+                StringOf(values, AgentIdField),
+                StringOf(values, QueueNameField),
+                StringOf(values, CallerIdNumField),
+                values.TryGetValue(ConnectedAtField, out var at) && long.TryParse(at.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms)
+                    ? DateTimeOffset.FromUnixTimeMilliseconds(ms)
+                    : null,
+                StringOf(values, LinkedIdField)));
+        }
+
+        return records;
+    }
+
+    private static IEnumerable<HashEntry> FieldsOf(LiveSessionRecord record)
+    {
+        // A field always exists, so a record with no call members is still a hash; an unknown member is left out.
+        yield return new HashEntry("sessionId", record.SessionId);
+        if (record.AgentId is { } agentId)
+            yield return new HashEntry(AgentIdField, agentId);
+        if (record.QueueName is { } queueName)
+            yield return new HashEntry(QueueNameField, queueName);
+        if (record.CallerIdNum is { } callerIdNum)
+            yield return new HashEntry(CallerIdNumField, callerIdNum);
+        if (record.ConnectedAt is { } connectedAt)
+            yield return new HashEntry(ConnectedAtField, connectedAt.ToUnixTimeMilliseconds());
+        if (record.LinkedId is { } linkedId)
+            yield return new HashEntry(LinkedIdField, linkedId);
+    }
+
+    private static string? StringOf(Dictionary<RedisValue, RedisValue> values, RedisValue field) =>
+        values.TryGetValue(field, out var value) && !value.IsNull ? value.ToString() : null;
+}

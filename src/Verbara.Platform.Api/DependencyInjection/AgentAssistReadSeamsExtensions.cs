@@ -11,13 +11,15 @@ internal static class AgentAssistReadSeamsExtensions
     /// <summary>
     /// Registers <see cref="IAgentAssistLiveSessions"/> over the optional Pro <see cref="AgentAssistSupervisor"/> (absent
     /// without Pro Agent Assist) and <see cref="IAgentAssistRecordReader"/>, which resolves the record stores when a record
-    /// is read: they are registered only with an Analytics connection string.
+    /// is read: they are registered only with an Analytics connection string. Then the single-replica defaults of the
+    /// live stream's feed and the Monitor list (<see cref="CrossPodStreamExtensions.AddAgentAssistReadDefaults"/>), kept
+    /// out when the backplane registered its own.
     /// </summary>
     public static IServiceCollection AddAgentAssistReadSeams(this IServiceCollection services)
     {
         services.AddSingleton<IAgentAssistLiveSessions>(sp =>
             new AgentAssistLiveSessions(sp.GetService<AgentAssistSupervisor>()));
         services.AddSingleton<IAgentAssistRecordReader>(sp => new AgentAssistRecordReader(sp));
-        return services;
+        return services.AddAgentAssistReadDefaults();
     }
 }

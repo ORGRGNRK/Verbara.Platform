@@ -107,6 +107,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   replicas, only the replica that holds the voice AMI connection assists calls, at most one session runs per call (a
   claim per call in the `Postgres` database), and each session transcribes with the provider and credentials stored at
   the moment it starts.
+- **Agent Assist results reach an agent and a supervisor on any Api replica.** The engine runs on one replica, while
+  an agent's `GET /api/v1/events/stream` and a supervisor's `GET /api/v1/supervisor/sessions/active` may be served by
+  another. With `ConnectionStrings__Redis` set, the four `agentassist.*` events now cross replicas on the Redis
+  backplane and reach the same subscribers they reach on the engine's replica (the agent the event names, and the
+  users who read every conversation of the tenant), each once and in the order they were published; a received event
+  is not sent to webhooks again. The Monitor list is kept in Redis, so every replica answers the same sessions: a
+  session is listed to its tenant within a quarter second of its call being given a tenant, and when its call is later
+  given a different tenant the former tenant stops seeing it within 5 seconds. A session's `conversationId` is still
+  looked up in the caller's tenant on each read, so a row never shows another tenant's conversation. Without Redis both stay on the one replica, as before; run a single Api replica then.
+  New counter on `/metrics`: `platform_agentassist_crosspod_received_total{outcome}` (`delivered`, `empty_payload`,
+  `tenant_mismatch`, `decode_error`).
 - **Agent Assist sends each snoop's audio to the replica that created it.** The listener uses
   `AgentAssist:AudioSocket:Port`, and each snoop carries `AgentAssist:AudioSocket:AdvertisedHost` and that port as its
   audio address, resolved when the first call needs it (`auto`: the replica's own address on its route to Asterisk).

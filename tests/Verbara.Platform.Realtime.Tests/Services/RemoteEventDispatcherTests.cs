@@ -219,4 +219,47 @@ public sealed class RemoteEventDispatcherTests
 
         await dispatcher.StopAsync(CancellationToken.None);
     }
+
+    /// <summary>The options the Api hands its relay to serialize a payload.</summary>
+    private static readonly JsonSerializerOptions BackplaneOptions = new() { TypeInfoResolver = PlatformPushJsonContext.Default };
+
+    public static TheoryData<string> AgentAssistPayloads() => new()
+    {
+        "agentassist.suggestion",
+        "agentassist.sentiment",
+        "agentassist.compliance_alert",
+        "agentassist.transcript",
+    };
+
+    private static PlatformEvent AgentAssistEvent(string type) => type switch
+    {
+        "agentassist.suggestion" => new AgentAssistSuggestionEvent("acme", "as-1", "a-1", "c-1", "sg-1", "Offer a refund", "Important", "Keyword", null),
+        "agentassist.sentiment" => new AgentAssistSentimentEvent("acme", "as-1", "a-1", "c-1", "Caller", -0.6f, "Frustrated", ["again"]),
+        "agentassist.compliance_alert" => new AgentAssistComplianceAlertEvent("acme", "as-1", "a-1", "c-1", "cr-1", "card", "Warning"),
+        "agentassist.transcript" => new AgentAssistTranscriptEvent("acme", "as-1", "a-1", "c-1", "Caller", "hello", IsFinal: true),
+        _ => throw new ArgumentOutOfRangeException(nameof(type)),
+    };
+
+    /// <summary>
+    /// agent-assist-works-end-to-end (design D12, echo guard): the four <c>agentassist.*</c> are for the Api's live streams.
+    /// Realtime acknowledges each, with or without a payload, and puts nothing on its own bus, so its relay has nothing to
+    /// send back onto the backplane.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AgentAssistPayloads))]
+    public async Task Dispatch_ShouldPublishNothing_WhenTheEnvelopeIsAnAgentAssistEvent(string type)
+    {
+        using var bus = new FakePushEventBus();
+        var dispatcher = new RemoteEventDispatcher(bus, NullLogger<RemoteEventDispatcher>.Instance);
+        await dispatcher.StartAsync(CancellationToken.None);
+        var typed = AgentAssistEvent(type);
+
+        bus.Emit(MakeEnvelope(JsonSerializer.Serialize(typed, typed.GetType(), BackplaneOptions), type));
+        bus.Emit(MakeEnvelope(string.Empty, type));
+
+        bus.Published.Should().BeEmpty($"Realtime must not re-publish {type}: its relay would echo it onto the backplane");
+        RemoteEventDispatcher.HandledEventTypes.Should().Contain(typed.GetType(), "the guard counts it as handled");
+
+        await dispatcher.StopAsync(CancellationToken.None);
+    }
 }

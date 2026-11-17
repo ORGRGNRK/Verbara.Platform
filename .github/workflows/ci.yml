@@ -216,9 +216,10 @@ jobs:
           retention-days: 90
 
       - name: Unit tests
-        # Excludes ONLY the two genuinely container-backed test projects —
-        # Storage.Postgres.Tests (Postgres Testcontainer) and Identity.Redis.Tests
-        # (Redis) — which hard-fail without Docker. The filter targets each
+        # Excludes ONLY the genuinely container-backed test projects —
+        # Storage.Postgres.Tests (Postgres Testcontainer), Identity.Redis.Tests and
+        # Api.Redis.Tests (Redis) — which hard-fail without Docker. The substring
+        # "Api.Redis.Tests" matches no other test assembly name. The filter targets each
         # project's namespace PRECISELY rather than the bare tokens
         # "Postgres"/"Redis"/"Integration": those substrings also appear in
         # legitimate in-memory unit tests elsewhere (e.g. Api.Tests'
@@ -230,7 +231,7 @@ jobs:
         # [Category] trait (only one test in the whole suite is traited).
         run: >-
           dotnet test Verbara.Platform.slnx --no-build -c Release
-          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests"
+          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests&FullyQualifiedName!~Api.Redis.Tests"
           --logger "console;verbosity=normal"
           --blame-hang-timeout 5m --blame-hang-dump-type none --results-directory TestResults
       - name: Upload hang report
@@ -371,6 +372,15 @@ jobs:
           --no-build -c Release --logger "console;verbosity=normal"
           --blame-hang-timeout 5m --blame-hang-dump-type none --results-directory TestResults
 
+      - name: Live-DB tests — Api.Redis.Tests
+        # Two Api hosts and a Realtime-style echoer on one Redis Testcontainer: the Agent Assist backplane
+        # and the shared Monitor list. Dependabot CI-load skip as above, and for the same reason STEP-level.
+        if: github.event_name == 'merge_group' || github.event.pull_request.user.login != 'dependabot[bot]'
+        run: >-
+          dotnet test tests/Verbara.Platform.Api.Redis.Tests/Verbara.Platform.Api.Redis.Tests.csproj
+          --no-build -c Release --logger "console;verbosity=normal"
+          --blame-hang-timeout 5m --blame-hang-dump-type none --results-directory TestResults
+
       - name: Upload hang report
         # #428: --blame-hang-timeout aborts a test that runs 5 min without finishing and writes the sequence of
         # tests that ran (Sequence_*.xml; the hung test is the entry with Completed="False"). Uploaded only on failure.
@@ -441,7 +451,7 @@ jobs:
         # (Storage.Postgres / Identity.Redis) so the gate measures unit-tested code.
         run: >-
           dotnet test Verbara.Platform.slnx --no-build -c Release
-          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests"
+          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests&FullyQualifiedName!~Api.Redis.Tests"
           --collect:"XPlat Code Coverage" --settings coverlet.runsettings
           --results-directory ${{ github.workspace }}/coverage
           --blame-hang-timeout 5m --blame-hang-dump-type none

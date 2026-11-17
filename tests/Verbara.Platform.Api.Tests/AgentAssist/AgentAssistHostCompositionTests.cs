@@ -13,6 +13,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Verbara.Platform.Api.Services;
+using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Api.Tests.Conversations;
 using Verbara.Platform.Core;
 using Verbara.Sdk;
@@ -117,7 +118,8 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
     [Fact]
     public async Task Startup_ShouldForwardASessionTheEngineAnnouncesWhileTheHostIsStillStarting()
     {
-        var call = new CallSession("aa-startup-window", "1712345678.30", ServerId, CallDirection.Inbound);
+        var call = new CallSession("aa-startup-window", "1712345678.30", ServerId, CallDirection.Inbound) { TenantId = "demo" };
+        var monitor = new MemoryLiveSessionStore(TimeProvider.System);
         using var events = new ReplaySignal();
         var audio = new AudioSocketServer(new AudioSocketOptions { Port = 0 }, NullLogger<AudioSocketServer>.Instance);
         var clients = new ConcurrentBag<AudioSocketClient>();
@@ -160,6 +162,7 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
                 services.RemoveAll<SpeechRecognizer>();
                 services.AddSingleton(recognized);
                 services.AddTransient<SpeechRecognizer, ReleasedRecognizer>();
+                services.Replace(ServiceDescriptor.Singleton<IAgentAssistLiveSessionStore>(monitor));   // a shared list
             });
 
         try
@@ -179,6 +182,8 @@ public sealed class AgentAssistHostCompositionTests(ConversationClockReconcileLi
             inTime.Should().BeTrue(
                 "the bridge must forward the transcript of a session announced during startup; it did not: " +
                 "session announced before the bridge subscribed");
+            (await monitor.ListAsync("demo", CancellationToken.None)).Select(r => r.SessionId).Should().Equal(
+                [call.SessionId], "the bridge wrote the Monitor record of the session announced during startup (design D12)");
         }
         finally
         {

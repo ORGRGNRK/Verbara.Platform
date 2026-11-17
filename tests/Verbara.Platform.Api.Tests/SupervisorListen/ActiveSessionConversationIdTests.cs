@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using NSubstitute;
 using Verbara.Platform.Api.Endpoints;
 using Verbara.Platform.Api.Serialization;
+using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Conversations;
 using Verbara.Platform.Core;
 using Verbara.Sdk.Enums;
@@ -20,6 +21,8 @@ public sealed class ActiveSessionConversationIdTests
 {
     private static readonly TenantId Caller = new("acme");
     private readonly IConversationStore _conversations = Substitute.For<IConversationStore>();
+
+    private static LiveSessionRecord Live(string sessionId, CallSession? call) => LiveSessionRecord.Of(sessionId, Caller.Value, call);
 
     private static CallSession Call(string linkedId) => new($"s-{linkedId}", linkedId, "primary", CallDirection.Inbound)
     {
@@ -45,7 +48,7 @@ public sealed class ActiveSessionConversationIdTests
         var tracked = Tracked(Caller, "1712345678.40");
 
         var items = await SupervisorEndpoints.ToActiveSessionsAsync(
-            [("1712345678.42", Call("1712345678.40"))], Caller, _conversations, CancellationToken.None);
+            [Live("1712345678.42", Call("1712345678.40"))], Caller, _conversations, CancellationToken.None);
 
         var item = items.Should().ContainSingle().Subject;
         item.SessionId.Should().Be("1712345678.42");
@@ -61,9 +64,9 @@ public sealed class ActiveSessionConversationIdTests
 
         var items = await SupervisorEndpoints.ToActiveSessionsAsync(
         [
-            ("1712345699.07", Call("1712345699.01")),
-            ("1712345699.08", Call("1712345699.02")),
-            ("1712345699.09", null),
+            Live("1712345699.07", Call("1712345699.01")),
+            Live("1712345699.08", Call("1712345699.02")),
+            Live("1712345699.09", null),
         ], Caller, _conversations, CancellationToken.None);
 
         items.Select(i => i.ConversationId).Should().AllSatisfy(id => id.Should().BeNull());

@@ -42,6 +42,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Verbara.Platform.Api.Tests" />
+    <InternalsVisibleTo Include="Verbara.Platform.Api.Redis.Tests" />
   </ItemGroup>
 
 <ItemGroup>

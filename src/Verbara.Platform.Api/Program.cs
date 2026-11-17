@@ -126,7 +126,7 @@ builder.Services.AddLiveConnectionRevocation();
 var pushBackplaneRedis = builder.Configuration.GetConnectionString("Redis");
 if (!string.IsNullOrWhiteSpace(pushBackplaneRedis))
 {
-    builder.Services.AddVerbaraProPushRedis(pushBackplaneRedis);
+    builder.Services.AddVerbaraProPushRedis(pushBackplaneRedis).AddAgentAssistBackplane();
 
     // v2.5.0 — supply the source-gen JsonSerializerContext that knows every
     // Verbara.Platform.Core push-event record. Without this,

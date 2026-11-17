@@ -27,6 +27,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Verbara.Platform.Api.Redis.Tests reuses this project's hosts and stream probe. -->
+    <InternalsVisibleTo Include="Verbara.Platform.Api.Redis.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The widened-window decorator of the queue enumeration, driven through the wrap-up refresh. -->
     <Compile Include="..\Verbara.Platform.Storage.InMemory.Tests\DeleteAfterFirstPageQueueStore.cs" Link="DeleteAfterFirstPageQueueStore.cs" />
   </ItemGroup>
