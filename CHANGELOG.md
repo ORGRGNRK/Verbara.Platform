@@ -44,6 +44,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restart of this upgrade discards whatever was set through these routes: the toggle and the engine settings start again
   from the `AgentAssist` configuration section, and the keyword and compliance rules start empty. The Agent Assist
   session reads under `/api/v1/agent-assist/sessions` are unchanged.
+- **Agent Assist can be switched on only with a live speech provider.** `PUT /api/v1/admin/features/agent-assist`
+  with `enabled` true now accepts `provider` `deepgram` only. `whisper`, `azure-whisper` and `google` answer 400 with
+  an error on `provider` explaining that their recognizer returns text only after the audio ends, so it cannot
+  transcribe a call while it is in progress. `credentials.endpoint`, when present, must be an absolute `ws://` or
+  `wss://` URI, else 400 with an error on `credentials`. A refused request leaves the stored state unchanged. Member
+  names are unchanged, and a state stored earlier with one of those providers is still returned by `GET` as stored.
 - **A call analysed with an empty scorecard has no QA score.** An analysis whose scorecard had no item (a maximum
   score of 0) used to report `hasQaScore` true with `qaScore` 0. Now `GET /api/v1/analytics/cdr` and
   `GET /api/v1/analytics/cdr/{sessionId}` answer `hasQaScore` false with `qaScore` null (the detail answers
