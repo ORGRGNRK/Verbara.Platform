@@ -124,6 +124,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   looked up in the caller's tenant on each read, so a row never shows another tenant's conversation. Without Redis both stay on the one replica, as before; run a single Api replica then.
   New counter on `/metrics`: `platform_agentassist_crosspod_received_total{outcome}` (`delivered`, `empty_payload`,
   `tenant_mismatch`, `decode_error`).
+- **Agent Assist events carry the call's tenant, agent and conversation even when they are known late.** The four
+  `agentassist.*` events of a session used to take the call's tenant, the agent and the conversation once, when the
+  session started; a call given its tenant a moment later (a slow lookup or a replica handover) then sent every event
+  of the session with an empty `tenantId`, and no agent ever saw them. Now an event emitted before the call has a tenant
+  is held (up to 128 per session, the oldest dropped first) and published, in order, as soon as the tenant is known,
+  with the agent and conversation of that tenant. An event whose conversation is not found yet waits up to 3 seconds,
+  then goes out with an empty `conversationId`, and later events carry it once it is found. Each event keeps the time
+  it was emitted in `timestamp`. When a call is given a different tenant, later events carry the new tenant with its
+  own conversation, never the former tenant's. A session whose call and session disagree on the tenant publishes
+  nothing. Each event is published once: a failed publish is logged, no longer retried later out of order. New counter
+  on `/metrics`: `platform_agentassist_events_held_dropped_total{reason}` (`tenant_unresolved`, `conflict`,
+  `overflow`) counts held events that were never published.
 - **Agent Assist sends each snoop's audio to the replica that created it.** The listener uses
   `AgentAssist:AudioSocket:Port`, and each snoop carries `AgentAssist:AudioSocket:AdvertisedHost` and that port as its
   audio address, resolved when the first call needs it (`auto`: the replica's own address on its route to Asterisk).

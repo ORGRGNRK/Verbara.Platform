@@ -74,6 +74,7 @@ internal static class AgentAssistHostingExtensions
         // Before the engine: the host starts hosted services in registration order, so the bridge has subscribed to the
         // supervisor's session announcements (no replay) before the engine can announce any.
         services.AddHostedService<AgentAssistBridge>();
+        services.TryAddSingleton<AgentAssistHeldEventMetrics>();
 
         services.AddAgentAssistRecognizer();
         services.TryAddSingleton<IAgentAssistActivationGate, VoiceLeaderActivationGate>();

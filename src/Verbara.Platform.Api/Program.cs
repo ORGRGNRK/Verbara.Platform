@@ -420,7 +420,7 @@ builder.Services.AddVerbaraOpenTelemetry(b => b
     .AddMeter(Verbara.Platform.Api.Services.RealtimeReconciliationService.MeterName)
     .AddMeter(Verbara.Platform.Api.Services.RecoveryCodeFamilyMetrics.MeterName) // mfa.recovery_codes.{users,redeemed}
     .AddMeter(Verbara.Platform.Api.Services.StasisInboundConsumer.MeterName) // voice.stasis.app_replaced (ADR-0044)
-    .AddMeter(Verbara.Platform.Api.Services.AgentAssist.AgentAssistCallClaimMetrics.MeterName) // platform.agentassist.* (call claim, toggle, recognizer)
+    .AddMeter(Verbara.Platform.Api.Services.AgentAssist.AgentAssistCallClaimMetrics.MeterName) // platform.agentassist.* (call claim, toggle, recognizer, held events)
     .AddMeter(Verbara.Platform.Api.Services.DialerDispositionMetrics.MeterName).AddMeter(Verbara.Platform.Api.Services.ConversationCloseMetrics.MeterName).AddMeter(Verbara.Platform.Routing.Inbound.RoutingMetrics.MeterName) // dialer.disposition_dispatch.* (D16); conversations.system_closed (inactivity close D13); routing.last_agent (last-agent routing D8)
     .AddDigitalChannelMeters() // channels.delivery_status.unknown_id, whatsapp.webhook.rejected
     .AddCapacityMeters() // Npgsql pool + operation instruments, auth.write.* (measure-api-multi-replica-baseline D1)
@@ -994,8 +994,6 @@ builder.Services.AddKeyedSingleton<Verbara.Sdk.Resilience.ResiliencePolicy>(
     RealtimeStateBridge.ResiliencePolicyKey, (_, _) => BuildDefaultWorkerPolicy());
 builder.Services.AddKeyedSingleton<Verbara.Sdk.Resilience.ResiliencePolicy>(
     CampaignMetricsPoller.ResiliencePolicyKey, (_, _) => BuildDefaultWorkerPolicy());
-builder.Services.AddKeyedSingleton<Verbara.Sdk.Resilience.ResiliencePolicy>(
-    AgentAssistBridge.ResiliencePolicyKey, (_, _) => BuildDefaultWorkerPolicy());
 builder.Services.AddKeyedSingleton<Verbara.Sdk.Resilience.ResiliencePolicy>(
     Verbara.Platform.Automation.TimerPollingService.ResiliencePolicyKey,
     (_, _) => BuildDefaultWorkerPolicy());

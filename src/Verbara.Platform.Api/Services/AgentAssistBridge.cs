@@ -2,9 +2,9 @@ using System.Collections.Concurrent;
 using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Conversations;
 using Verbara.Platform.Core;
+using Verbara.Sdk.Pro.AgentAssist.Domain;
 using Verbara.Sdk.Pro.AgentAssist.Engine;
-using Verbara.Sdk.Resilience;
-using Microsoft.Extensions.DependencyInjection;
+using Verbara.Sdk.Sessions;
 
 namespace Verbara.Platform.Api.Services;
 
@@ -12,28 +12,24 @@ namespace Verbara.Platform.Api.Services;
 /// Bridges <see cref="AgentAssistSupervisor"/> observable streams into
 /// <see cref="PlatformEventBus"/> so agent assist events flow out via SSE.
 /// </summary>
+/// <remarks>
+/// Each session's events carry the identity its <see cref="AgentAssistSessionIdentity"/> binds when they are published
+/// (agent-assist-works-end-to-end, design D14): the owner tenant, the agent and the conversation are re-evaluated, never
+/// read once when the session starts, and an event emitted before they are known is held and published later, in order.
+/// Each event is published once, under the session's lock; a failed publish is logged, not retried.
+/// </remarks>
 internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
 {
-    /// <summary>
-    /// Keyed-service name for the per-event <see cref="ResiliencePolicy"/> that wraps each
-    /// observable publish pass. In-memory bus means the policy rarely fires, but it protects
-    /// against downstream observable throws from poisoning the subscription.
-    /// </summary>
-    public const string ResiliencePolicyKey = "worker.agent-assist-bridge";
-
     private readonly AgentAssistSupervisor _supervisor;
     private readonly PlatformEventBus _eventBus;
     private readonly IConversationStore _conversationStore;
-    private readonly ResiliencePolicy _policy;
     private readonly ILogger<AgentAssistBridge> _logger;
     private readonly IAgentAssistLiveSessionStore? _liveSessionStore;
     private readonly TimeProvider _time;
+    private readonly AgentAssistHeldEventMetrics? _heldMetrics;
 
-    // Per-session composite subscription (4 observables per session)
-    private readonly ConcurrentDictionary<string, IDisposable> _sessionSubs = new();
-
-    // Per-session Monitor record (design D12), only when the list is shared between replicas.
-    private readonly ConcurrentDictionary<string, AgentAssistSessionFiling> _filings = new();
+    // Per-session subscriptions, identity and Monitor record.
+    private readonly ConcurrentDictionary<string, Attached> _sessions = new();
 
     private IDisposable? _startedSub;
     private IDisposable? _endedSub;
@@ -43,24 +39,24 @@ internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
         PlatformEventBus eventBus,
         IConversationStore conversationStore,
         ILogger<AgentAssistBridge> logger,
-        [FromKeyedServices(ResiliencePolicyKey)] ResiliencePolicy? policy = null,
         IAgentAssistLiveSessionStore? liveSessionStore = null,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        AgentAssistHeldEventMetrics? heldMetrics = null)
     {
         _supervisor = supervisor;
         _eventBus = eventBus;
         _conversationStore = conversationStore;
         _logger = logger;
-        _policy = policy ?? ResiliencePolicy.NoOp;
         _liveSessionStore = liveSessionStore is { IsShared: true } ? liveSessionStore : null;
         _time = time ?? TimeProvider.System;
+        _heldMetrics = heldMetrics;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        // Fire-and-forget into the guarded async handler — OnNext must be synchronous + never throw.
-        _startedSub = _supervisor.SessionStarted.Subscribe(s => _ = OnSessionStartedAsync(s));
-        _endedSub   = _supervisor.SessionEnded.Subscribe(OnSessionEnded);
+        // OnNext must be synchronous and never throw: Attach subscribes before it returns and catches everything.
+        _startedSub = _supervisor.SessionStarted.Subscribe(s => Attach(AssistSessionFeed.Of(s)));
+        _endedSub   = _supervisor.SessionEnded.Subscribe(s => Detach(s.SessionId));
         return Task.CompletedTask;
     }
 
@@ -70,134 +66,90 @@ internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
-    private async Task OnSessionStartedAsync(AgentAssistSession session)
+    /// <summary>
+    /// Starts bridging one announced session. Runs synchronously and awaits nothing: the session's streams do not
+    /// replay, so every subscription is in place before this returns and the session can emit (design D14, "The bridge
+    /// subscribes before its first await"). The conversation lookup starts after the subscriptions.
+    /// </summary>
+    internal void Attach(AssistSessionFeed session)
     {
         try
         {
             var sessionId = session.SessionId;
-            var callSession = session.CallSession;
-            var tenantId = callSession?.TenantId?.ToString() ?? string.Empty;
-
-            // Derive the platform agentId (the SAME value the client filters on) from the member
-            // interface, with a tenant guard + CallSession.AgentId fallback (see DeriveAgentId).
-            var agentId = DeriveAgentId(tenantId, callSession?.AgentInterface, callSession?.AgentId?.ToString());
-
-            // ConversationId is resolved AFTER subscribing (below). Subscribing FIRST + storing the
-            // composite BEFORE the await is load-bearing: (a) the Rx subjects do not replay, so an
-            // await before Subscribe would drop early emissions (finding #11); (b) a concurrent
-            // OnSessionEnded during the await always finds the stored composite to dispose, so the
-            // subscription can never be orphaned (finding #12). The Subscribe closures read this
-            // mutable local lazily at emission time, so reassigning it post-await is picked up.
-            var conversationId = string.Empty;
+            var identity = new AgentAssistSessionIdentity(
+                sessionId, session.StartTenant, session.Call, _conversationStore, _eventBus, _time, _logger, _heldMetrics);
 
             // The Monitor record (design D12): filed under the session's owner tenant, re-evaluated on each event below,
-            // at each heartbeat and at each bind check, and removed at the end. Created before the first await, like the
-            // subscriptions, so a SessionEnded always finds it.
+            // at each heartbeat and at each bind check, and removed at the end.
             AgentAssistSessionFiling? filing = null;
             if (_liveSessionStore is not null)
             {
                 filing = AgentAssistSessionFiling.Start(
-                    sessionId, session.TenantId, callSession, _liveSessionStore, _time, _logger,
-                    () => AgentAssistLiveSessions.LatestCallerSentimentOf(session));
-                _filings[sessionId] = filing;
+                    sessionId, session.StartTenant, session.Call, _liveSessionStore, _time, _logger,
+                    session.LatestCallerSentiment);
             }
 
             var suggestionSub = session.Suggestions.Subscribe(s =>
             {
                 filing?.OnEmission();
-                _ = PublishWithPolicyAsync(
-                    sessionId,
-                    () => _eventBus.Publish(new AgentAssistSuggestionEvent(
-                        tenantId,
-                        sessionId,
-                        agentId,
-                        conversationId,
-                        s.Id,
-                        s.Text,
-                        s.Priority.ToString(),
-                        s.Source.ToString(),
-                        s.TriggerPhrase)),
+                identity.Emit(
+                    (tenantId, agentId, conversationId) => new AgentAssistSuggestionEvent(
+                        tenantId, sessionId, agentId, conversationId,
+                        s.Id, s.Text, s.Priority.ToString(), s.Source.ToString(), s.TriggerPhrase),
                     Log.PublishSuggestionFailed);
             });
 
             var sentimentSub = session.Sentiment.Subscribe(r =>
             {
                 filing?.OnEmission();
-                _ = PublishWithPolicyAsync(
-                    sessionId,
-                    () => _eventBus.Publish(new AgentAssistSentimentEvent(
-                        tenantId,
-                        sessionId,
-                        agentId,
-                        conversationId,
-                        r.Speaker.ToString(),
-                        r.Score,
-                        r.Label.ToString(),
-                        r.TriggerWords)),
+                identity.Emit(
+                    (tenantId, agentId, conversationId) => new AgentAssistSentimentEvent(
+                        tenantId, sessionId, agentId, conversationId,
+                        r.Speaker.ToString(), r.Score, r.Label.ToString(), r.TriggerWords),
                     Log.PublishSentimentFailed);
             });
 
             var complianceSub = session.ComplianceAlerts.Subscribe(a =>
             {
                 filing?.OnEmission();
-                _ = PublishWithPolicyAsync(
-                    sessionId,
-                    () => _eventBus.Publish(new AgentAssistComplianceAlertEvent(
-                        tenantId,
-                        sessionId,
-                        agentId,
-                        conversationId,
-                        a.RuleId,
-                        a.Phrase,
-                        a.Severity.ToString())),
+                identity.Emit(
+                    (tenantId, agentId, conversationId) => new AgentAssistComplianceAlertEvent(
+                        tenantId, sessionId, agentId, conversationId,
+                        a.RuleId, a.Phrase, a.Severity.ToString()),
                     Log.PublishComplianceAlertFailed);
             });
 
             var transcriptSub = session.Transcripts.Subscribe(t =>
             {
                 filing?.OnEmission();
-                _ = PublishWithPolicyAsync(
-                    sessionId,
-                    () => _eventBus.Publish(new AgentAssistTranscriptEvent(
-                        tenantId,
-                        sessionId,
-                        agentId,
-                        conversationId,
-                        t.Speaker.ToString(),
-                        t.Text,
-                        IsFinal: true)),
+                identity.Emit(
+                    (tenantId, agentId, conversationId) => new AgentAssistTranscriptEvent(
+                        tenantId, sessionId, agentId, conversationId,
+                        t.Speaker.ToString(), t.Text, IsFinal: true),
                     Log.PublishTranscriptFailed);
             });
 
-            // Combine all 4 subscriptions into a single disposable so cleanup is atomic. Stored BEFORE
-            // the await below so a concurrent OnSessionEnded can always find + dispose it.
-            var composite = new CompositeDisposable(suggestionSub, sentimentSub, complianceSub, transcriptSub);
-            _sessionSubs[sessionId] = composite;
+            _sessions[sessionId] = new Attached(
+                new CompositeDisposable(suggestionSub, sentimentSub, complianceSub, transcriptSub), identity, filing);
 
-            // Resolve the tracked voice Conversation by the SAME voice_linked_id key
-            // VoiceConversationBridge writes, so agent-assist suggestions/sentiment/transcript bind to
-            // the screen-popped conversation. Best-effort: an unresolved id leaves ConversationId empty
-            // (the client routes nothing). The Subscribe closures above read `conversationId` lazily,
-            // so assigning it here applies to all subsequent emissions.
-            if (callSession is not null && !string.IsNullOrEmpty(tenantId) && !string.IsNullOrEmpty(callSession.LinkedId))
-            {
-                var conversation = await _conversationStore
-                    .FindByVoiceLinkedIdAsync(new TenantId(tenantId), callSession.LinkedId, CancellationToken.None)
-                    .ConfigureAwait(false);
-                conversationId = conversation?.ConversationId.Value ?? string.Empty;
-            }
+            // After every Subscribe: the first lookup, when the owner is already known.
+            identity.Refresh();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             Log.SessionStartFailed(_logger, session.SessionId, ex);
         }
     }
 
-    private void OnSessionEnded(AgentAssistSession session)
+    /// <summary>The session ended: stops its subscriptions, ends its identity and removes its Monitor record.</summary>
+    internal void Detach(string sessionId)
     {
-        if (_sessionSubs.TryRemove(session.SessionId, out var subs))
-            subs.Dispose();
-        if (_filings.TryRemove(session.SessionId, out var filing))
+        if (!_sessions.TryRemove(sessionId, out var attached))
+            return;
+
+        attached.Subscriptions.Dispose();
+        attached.Identity.End();
+        if (attached.Filing is { } filing)
             _ = filing.EndAsync();
     }
 
@@ -216,48 +168,39 @@ internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
         return parsed ?? fallbackAgentId ?? string.Empty;
     }
 
-    internal async Task PublishWithPolicyAsync(
-        string sessionId,
-        Action publish,
-        Action<ILogger, string, Exception> onError)
-    {
-        try
-        {
-            await _policy.ExecuteAsync(
-                ResiliencePolicyKey,
-                innerCt =>
-                {
-                    publish();
-                    return ValueTask.FromResult(0);
-                },
-                CancellationToken.None);
-        }
-        catch (CircuitBreakerOpenException)
-        {
-            Log.CircuitOpen(_logger, sessionId);
-        }
-        catch (Exception ex)
-        {
-            onError(_logger, sessionId, ex);
-        }
-    }
-
     public void Dispose()
     {
         _startedSub?.Dispose();
         _endedSub?.Dispose();
 
-        foreach (var subs in _sessionSubs.Values)
-            subs.Dispose();
-
-        _sessionSubs.Clear();
-
         // The records are left to expire (design D12): this replica stops, and its heartbeats with it.
-        foreach (var filing in _filings.Values)
-            filing.Dispose();
+        foreach (var attached in _sessions.Values)
+        {
+            attached.Subscriptions.Dispose();
+            attached.Identity.Dispose();
+            attached.Filing?.Dispose();
+        }
 
-        _filings.Clear();
+        _sessions.Clear();
     }
+
+    /// <summary>One announced session as the bridge reads it: its id, start-time tenant, call and four streams.</summary>
+    internal sealed record AssistSessionFeed(
+        string SessionId,
+        string? StartTenant,
+        CallSession? Call,
+        IObservable<TranscriptSegment> Transcripts,
+        IObservable<AgentSuggestion> Suggestions,
+        IObservable<SentimentReading> Sentiment,
+        IObservable<ComplianceAlert> ComplianceAlerts,
+        Func<string?>? LatestCallerSentiment = null)
+    {
+        internal static AssistSessionFeed Of(AgentAssistSession session) => new(
+            session.SessionId, session.TenantId, session.CallSession, session.Transcripts, session.Suggestions,
+            session.Sentiment, session.ComplianceAlerts, () => AgentAssistLiveSessions.LatestCallerSentimentOf(session));
+    }
+
+    private sealed record Attached(IDisposable Subscriptions, AgentAssistSessionIdentity Identity, AgentAssistSessionFiling? Filing);
 
     private static partial class Log
     {
@@ -273,12 +216,8 @@ internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
         [LoggerMessage(Level = LogLevel.Warning, Message = "[AgentAssistBridge] Error publishing transcript for session {SessionId}")]
         public static partial void PublishTranscriptFailed(ILogger logger, string sessionId, Exception exception);
 
-        [LoggerMessage(Level = LogLevel.Debug,
-            Message = "[AgentAssistBridge] Circuit open for worker.agent-assist-bridge — dropping event for session {SessionId}")]
-        public static partial void CircuitOpen(ILogger logger, string sessionId);
-
         [LoggerMessage(Level = LogLevel.Warning,
-            Message = "[AgentAssistBridge] Failed to start session {SessionId} (conversation/agent resolution)")]
+            Message = "[AgentAssistBridge] Failed to start session {SessionId}")]
         public static partial void SessionStartFailed(ILogger logger, string sessionId, Exception exception);
     }
 
