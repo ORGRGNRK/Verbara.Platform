@@ -27,6 +27,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AgentAssist:Deepgram:Language` (required for a session to be transcribed) configure Deepgram transcription. As
   environment variables, `AgentAssist__AudioSocket__Port` and so on. The existing `AgentAssist:Deepgram:ApiKey` and
   `:Endpoint` seed keys are unchanged.
+- `GET /api/v1/supervisor/sessions/active` items name the agent and the caller's mood. `agentId` is now the agent the
+  session's live events name (parsed from the call's queue-member interface in the caller's tenant, falling back to
+  the call's own agent id), so the Monitor list and the agent's console agree on who takes the call; it is `null` when
+  neither is known. New `agentName` is that agent's display name in the caller's tenant, and new `sentiment` is the
+  label of the session's latest caller sentiment reading (`Positive`, `Neutral`, `Negative`, `Frustrated` or
+  `Escalating`). Both are always written, `null` when unknown or before the first reading.
 
 ### Changed — BREAKING
 

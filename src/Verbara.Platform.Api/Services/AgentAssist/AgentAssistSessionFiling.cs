@@ -18,6 +18,8 @@ namespace Verbara.Platform.Api.Services.AgentAssist;
 /// <item>the two tenants conflict: the record is removed, so the session is listed to nobody;</item>
 /// <item>the session ended: the record is removed and nothing re-files it.</item>
 /// </list>
+/// The record also carries the label of the session's latest caller sentiment reading (design D13): an event after which
+/// that label differs from the one last filed re-files the record at once.
 /// Every write runs on one queue per session, so a heartbeat that runs after the end re-writes nothing.
 /// </summary>
 internal sealed partial class AgentAssistSessionFiling : IDisposable
@@ -34,6 +36,7 @@ internal sealed partial class AgentAssistSessionFiling : IDisposable
     private readonly string _sessionId;
     private readonly string? _sessionTenant;
     private readonly CallSession? _call;
+    private readonly Func<string?> _sentiment;
     private readonly IAgentAssistLiveSessionStore _store;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
@@ -49,13 +52,17 @@ internal sealed partial class AgentAssistSessionFiling : IDisposable
     // Read on each event without the queue: the owner the record was last filed under, or null.
     private volatile string? _lastOwner;
 
+    // Read on each event without the queue: the sentiment label the record was last filed with, or null.
+    private volatile string? _lastSentiment;
+
     private AgentAssistSessionFiling(
         string sessionId, string? sessionTenant, CallSession? call, IAgentAssistLiveSessionStore store, TimeProvider time,
-        ILogger logger)
+        ILogger logger, Func<string?>? sentiment)
     {
         _sessionId = sessionId;
         _sessionTenant = sessionTenant;
         _call = call;
+        _sentiment = sentiment ?? NoSentiment;
         _store = store;
         _time = time;
         _logger = logger;
@@ -66,12 +73,13 @@ internal sealed partial class AgentAssistSessionFiling : IDisposable
     /// <summary>
     /// Starts keeping the record of session <paramref name="sessionId"/>, whose start-time tenant is
     /// <paramref name="sessionTenant"/>, on <paramref name="call"/>: evaluates it now, then on every heartbeat.
+    /// <paramref name="sentiment"/> reads the label of the session's latest caller sentiment reading (none when omitted).
     /// </summary>
     public static AgentAssistSessionFiling Start(
         string sessionId, string? sessionTenant, CallSession? call, IAgentAssistLiveSessionStore store, TimeProvider time,
-        ILogger logger)
+        ILogger logger, Func<string?>? sentiment = null)
     {
-        var filing = new AgentAssistSessionFiling(sessionId, sessionTenant, call, store, time, logger);
+        var filing = new AgentAssistSessionFiling(sessionId, sessionTenant, call, store, time, logger, sentiment);
         filing.Enqueue();
         return filing;
     }
@@ -88,11 +96,13 @@ internal sealed partial class AgentAssistSessionFiling : IDisposable
 
     /// <summary>
     /// A bind check on an event of the session: queues a re-evaluation when the owner is no longer the one the record is
-    /// filed under. A property read otherwise.
+    /// filed under, or a filed record's sentiment label changed. Two reads otherwise.
     /// </summary>
     public void OnEmission()
     {
-        if (!string.Equals(OwnerNow(), _lastOwner, StringComparison.Ordinal))
+        var owner = OwnerNow();
+        if (!string.Equals(owner, _lastOwner, StringComparison.Ordinal)
+            || (owner is not null && !string.Equals(_sentiment(), _lastSentiment, StringComparison.Ordinal)))
             Enqueue();
     }
 
@@ -119,6 +129,8 @@ internal sealed partial class AgentAssistSessionFiling : IDisposable
     }
 
     private string? OwnerNow() => AgentAssistLiveSessions.OwnerTenantOf(_call?.TenantId, _sessionTenant);
+
+    private static string? NoSentiment() => null;
 
     private void Enqueue()
     {
@@ -168,10 +180,12 @@ internal sealed partial class AgentAssistSessionFiling : IDisposable
             return;
         }
 
-        var record = LiveSessionRecord.Of(_sessionId, owner, _call);
+        var sentiment = _sentiment();
+        var record = LiveSessionRecord.Of(_sessionId, owner, _call, sentiment);
         await _store.FileAsync(record, _time.GetUtcNow() + RecordTtl, CancellationToken.None).ConfigureAwait(false);
         _filedUnder = owner;
         _lastOwner = owner;
+        _lastSentiment = sentiment;
         _bindCheck.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 

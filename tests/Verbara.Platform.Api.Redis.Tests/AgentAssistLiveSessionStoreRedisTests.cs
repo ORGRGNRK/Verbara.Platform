@@ -7,6 +7,7 @@ using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Conversations;
 using Verbara.Platform.Core;
 using Verbara.Platform.Identity.Redis.Tests;
+using Verbara.Platform.Queues;
 using Verbara.Sdk.Enums;
 using Verbara.Sdk.Sessions;
 
@@ -25,6 +26,15 @@ public sealed class AgentAssistLiveSessionStoreRedisTests : IAsyncLifetime
     private readonly RedisFixture _redis;
     private readonly FakeTimeProvider _time = new(DateTimeOffset.UtcNow);
     private readonly IConversationStore _conversations = Substitute.For<IConversationStore>();
+    private readonly IAgentStore _agents = NoAgents();
+
+    private static IAgentStore NoAgents()
+    {
+        var agents = Substitute.For<IAgentStore>();
+        agents.GetByIdsAsync(Arg.Any<TenantId>(), Arg.Any<IReadOnlyCollection<EntityId>>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<Agent>());
+        return agents;
+    }
     private readonly List<AgentAssistSessionFiling> _filings = [];
     private readonly string _demo = $"demo-{Guid.NewGuid():N}";
     private readonly string _acme = $"acme-{Guid.NewGuid():N}";
@@ -89,7 +99,7 @@ public sealed class AgentAssistLiveSessionStoreRedisTests : IAsyncLifetime
     /// <summary>The list a supervisor of <paramref name="tenant"/> reads on a replica (<c>GET /supervisor/sessions/active</c>).</summary>
     private async Task<ActiveSessionDto[]> ListAsync(IAgentAssistLiveSessionStore store, string tenant) =>
         await SupervisorEndpoints.ToActiveSessionsAsync(
-            await store.ListAsync(tenant, CancellationToken.None), new TenantId(tenant), _conversations, CancellationToken.None);
+            await store.ListAsync(tenant, CancellationToken.None), new TenantId(tenant), _conversations, _agents, CancellationToken.None);
 
     private async Task<long> IndexLengthAsync(string tenant) =>
         await _replicaB!.GetDatabase().SortedSetLengthAsync(RedisAgentAssistLiveSessionStore.IndexKey(tenant));
@@ -101,9 +111,26 @@ public sealed class AgentAssistLiveSessionStoreRedisTests : IAsyncLifetime
 
         var row = (await ListAsync(StoreB, _demo)).Should().ContainSingle("replica B reads what replica A filed").Subject;
 
-        row.Should().Be(new ActiveSessionDto("as-redis-shown", "agent-7", "support", null,
-            new DateTimeOffset(2026, 11, 17, 10, 0, 0, 250, TimeSpan.Zero), DemoConversation));
+        row.Should().Be(new ActiveSessionDto("as-redis-shown", "agent-7", null, "support", null,
+            new DateTimeOffset(2026, 11, 17, 10, 0, 0, 250, TimeSpan.Zero), DemoConversation, null));
         (await ListAsync(StoreB, _acme)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task List_ShouldShowTheLatestSentimentTheOtherReplicaFiled_WhenAReadingArrived()
+    {
+        string? latest = null;
+        var filing = AgentAssistSessionFiling.Start("as-redis-sentiment", _demo, Call(_demo), StoreA, _time, NullLogger.Instance, () => latest);
+        _filings.Add(filing);
+        await filing.WhenIdleAsync();
+        (await ListAsync(StoreB, _demo)).Should().ContainSingle().Which.Sentiment.Should().BeNull("no reading yet");
+
+        latest = "Escalating";
+        filing.OnEmission();
+        await filing.WhenIdleAsync();
+
+        (await ListAsync(StoreB, _demo)).Should().ContainSingle().Which.Sentiment.Should().Be("Escalating",
+            "replica B reads the label replica A filed");
     }
 
     [Fact]

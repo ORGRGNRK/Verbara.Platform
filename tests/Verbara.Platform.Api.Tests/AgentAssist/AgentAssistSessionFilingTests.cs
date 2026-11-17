@@ -5,6 +5,7 @@ using Verbara.Platform.Api.Endpoints;
 using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Conversations;
 using Verbara.Platform.Core;
+using Verbara.Platform.Queues;
 using Verbara.Sdk.Enums;
 using Verbara.Sdk.Sessions;
 
@@ -27,6 +28,15 @@ public sealed class AgentAssistSessionFilingTests : IDisposable
     private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 11, 17, 10, 0, 0, TimeSpan.Zero));
     private readonly MemoryLiveSessionStore _store;
     private readonly IConversationStore _conversations = Substitute.For<IConversationStore>();
+    private readonly IAgentStore _agents = NoAgents();
+
+    private static IAgentStore NoAgents()
+    {
+        var agents = Substitute.For<IAgentStore>();
+        agents.GetByIdsAsync(Arg.Any<TenantId>(), Arg.Any<IReadOnlyCollection<EntityId>>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<Agent>());
+        return agents;
+    }
     private readonly List<AgentAssistSessionFiling> _filings = [];
 
     public AgentAssistSessionFilingTests()
@@ -70,7 +80,7 @@ public sealed class AgentAssistSessionFilingTests : IDisposable
     /// <summary><c>GET /supervisor/sessions/active</c> as a supervisor of <paramref name="tenant"/> reads it, on any replica.</summary>
     private async Task<ActiveSessionDto[]> ListAsync(string tenant) =>
         await SupervisorEndpoints.ToActiveSessionsAsync(
-            await _store.ListAsync(tenant, CancellationToken.None), new TenantId(tenant), _conversations, CancellationToken.None);
+            await _store.ListAsync(tenant, CancellationToken.None), new TenantId(tenant), _conversations, _agents, CancellationToken.None);
 
     [Fact]
     public async Task Filing_ShouldListTheSessionToItsTenant_WhenItsTenantIsKnownAtStart()
@@ -78,7 +88,7 @@ public sealed class AgentAssistSessionFilingTests : IDisposable
         await StartAsync(Demo, Call(Demo));
 
         var row = (await ListAsync(Demo)).Should().ContainSingle().Subject;
-        row.Should().Be(new ActiveSessionDto(SessionId, "agent-7", "support", null, null, DemoConversation));
+        row.Should().Be(new ActiveSessionDto(SessionId, "agent-7", null, "support", null, null, DemoConversation, null));
         (await ListAsync(Acme)).Should().BeEmpty("another tenant never sees it");
     }
 
@@ -150,7 +160,7 @@ public sealed class AgentAssistSessionFilingTests : IDisposable
 
         var demoAtOnce = (await ListAsync(Demo)).Should().ContainSingle(
             "until the next heartbeat (at most 5 s) the row stays filed under the tenant that owned it").Subject;
-        demoAtOnce.Should().Be(new ActiveSessionDto(SessionId, "agent-7", "support", null, null, DemoConversation),
+        demoAtOnce.Should().Be(new ActiveSessionDto(SessionId, "agent-7", null, "support", null, null, DemoConversation, null),
             "with its members from before the re-stamp");
         (await ListAsync(Acme)).Should().BeEmpty("it is never filed under the other tenant before the leader re-evaluates it");
 

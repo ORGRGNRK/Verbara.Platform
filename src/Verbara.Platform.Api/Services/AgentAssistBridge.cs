@@ -97,7 +97,8 @@ internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
             if (_liveSessionStore is not null)
             {
                 filing = AgentAssistSessionFiling.Start(
-                    sessionId, session.TenantId, callSession, _liveSessionStore, _time, _logger);
+                    sessionId, session.TenantId, callSession, _liveSessionStore, _time, _logger,
+                    () => AgentAssistLiveSessions.LatestCallerSentimentOf(session));
                 _filings[sessionId] = filing;
             }
 

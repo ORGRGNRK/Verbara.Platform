@@ -1,14 +1,15 @@
 using System.Globalization;
 using StackExchange.Redis;
+using Verbara.Platform.Api.Services;
 using Verbara.Sdk.Sessions;
 
 namespace Verbara.Platform.Api.Services.AgentAssist;
 
 /// <summary>
-/// One live Agent Assist session as the Monitor list reads it (agent-assist-works-end-to-end, design D12): the tenant it
-/// is filed under and the call members the list shows. The conversation is not stored: the list resolves it by
-/// <see cref="LinkedId"/> in the caller's tenant when it is read, so a row can never carry a conversation of a tenant it
-/// is no longer filed under.
+/// One live Agent Assist session as the Monitor list reads it (agent-assist-works-end-to-end, design D12, D13): the tenant
+/// it is filed under, the call members the list shows and the label of the session's latest caller sentiment reading.
+/// The conversation and the agent's name are not stored: the list resolves them in the caller's tenant when it is read,
+/// so a row can never carry a conversation or a name of a tenant it is no longer filed under.
 /// </summary>
 internal sealed record LiveSessionRecord(
     string SessionId,
@@ -17,11 +18,25 @@ internal sealed record LiveSessionRecord(
     string? QueueName,
     string? CallerIdNum,
     DateTimeOffset? ConnectedAt,
-    string? LinkedId)
+    string? LinkedId,
+    string? Sentiment = null)
 {
-    /// <summary>The record of session <paramref name="sessionId"/> on <paramref name="call"/>, filed under <paramref name="ownerTenant"/>.</summary>
-    public static LiveSessionRecord Of(string sessionId, string ownerTenant, CallSession? call) =>
-        new(sessionId, ownerTenant, call?.AgentId, call?.QueueName, call?.CallerIdNum, call?.ConnectedAt, call?.LinkedId);
+    /// <summary>
+    /// The record of session <paramref name="sessionId"/> on <paramref name="call"/>, filed under
+    /// <paramref name="ownerTenant"/>. The agent id is the one the session's live events carry
+    /// (<see cref="AgentAssistBridge.DeriveAgentId"/> in the owner tenant), or <see langword="null"/> when none is known.
+    /// </summary>
+    public static LiveSessionRecord Of(string sessionId, string ownerTenant, CallSession? call, string? sentiment = null) =>
+        new(sessionId, ownerTenant, AgentIdOf(ownerTenant, call), call?.QueueName, call?.CallerIdNum, call?.ConnectedAt,
+            call?.LinkedId, sentiment);
+
+    private static string? AgentIdOf(string ownerTenant, CallSession? call)
+    {
+        if (call is null)
+            return null;
+        var agentId = AgentAssistBridge.DeriveAgentId(ownerTenant, call.AgentInterface, call.AgentId);
+        return string.IsNullOrWhiteSpace(agentId) ? null : agentId;
+    }
 }
 
 /// <summary>
@@ -67,7 +82,7 @@ internal sealed class InProcessAgentAssistLiveSessionStore(IAgentAssistLiveSessi
         [
             .. liveSessions.Snapshot()
                 .Where(s => string.Equals(s.OwnerTenant, tenant, StringComparison.Ordinal))
-                .Select(s => LiveSessionRecord.Of(s.SessionId, tenant, s.Call)),
+                .Select(s => LiveSessionRecord.Of(s.SessionId, tenant, s.Call, s.Sentiment)),
         ]);
 }
 
@@ -86,6 +101,7 @@ internal sealed class RedisAgentAssistLiveSessionStore(IConnectionMultiplexer re
     private static readonly RedisValue CallerIdNumField = "callerIdNum";
     private static readonly RedisValue ConnectedAtField = "connectedAt";
     private static readonly RedisValue LinkedIdField = "linkedId";
+    private static readonly RedisValue SentimentField = "sentiment";
 
     /// <inheritdoc />
     public bool IsShared => true;
@@ -151,7 +167,8 @@ internal sealed class RedisAgentAssistLiveSessionStore(IConnectionMultiplexer re
                 values.TryGetValue(ConnectedAtField, out var at) && long.TryParse(at.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms)
                     ? DateTimeOffset.FromUnixTimeMilliseconds(ms)
                     : null,
-                StringOf(values, LinkedIdField)));
+                StringOf(values, LinkedIdField),
+                StringOf(values, SentimentField)));
         }
 
         return records;
@@ -171,6 +188,8 @@ internal sealed class RedisAgentAssistLiveSessionStore(IConnectionMultiplexer re
             yield return new HashEntry(ConnectedAtField, connectedAt.ToUnixTimeMilliseconds());
         if (record.LinkedId is { } linkedId)
             yield return new HashEntry(LinkedIdField, linkedId);
+        if (record.Sentiment is { } sentiment)
+            yield return new HashEntry(SentimentField, sentiment);
     }
 
     private static string? StringOf(Dictionary<RedisValue, RedisValue> values, RedisValue field) =>

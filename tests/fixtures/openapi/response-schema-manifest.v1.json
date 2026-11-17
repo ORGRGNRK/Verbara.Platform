@@ -689,10 +689,12 @@
         "ActiveSessionDto": [
           "sessionId",
           "agentId",
+          "agentName",
           "queueName",
           "callerIdNum",
           "connectedAt",
-          "conversationId"
+          "conversationId",
+          "sentiment"
         ],
         "AgentAssistConfigSnapshot": [
           "audioSocketPort",

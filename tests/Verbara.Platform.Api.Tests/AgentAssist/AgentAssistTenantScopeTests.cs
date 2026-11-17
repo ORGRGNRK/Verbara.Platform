@@ -349,10 +349,12 @@ public sealed class AgentAssistTenantScopeTests : IClassFixture<AgentAssistTenan
         {
             ["sessionId"] = id,
             ["agentId"] = "0651f84b6f284a1c9b8d658330fa8310",
+            ["agentName"] = null,
             ["queueName"] = "support",
             ["callerIdNum"] = call.CallerIdNum,
             ["connectedAt"] = "2026-11-06T15:01:00+00:00",
             ["conversationId"] = conversation.ConversationId.Value,
+            ["sentiment"] = null,
         };
         JsonNode.DeepEquals(item, expected).Should().BeTrue(
             $"the item keeps its shape field for field, its conversation resolved in the caller's tenant; it was {item.ToJsonString()}");
