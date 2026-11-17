@@ -14,6 +14,7 @@ using Verbara.Platform.Api.Tests.Auth;
 using Verbara.Platform.Core;
 using Verbara.Platform.Identity;
 using Verbara.Platform.Storage.Postgres.Seeds;
+using Verbara.Sdk.Pro.AgentAssist.Features;
 using Verbara.Sdk.Pro.AgentAssist.Storage.Postgres.Stores;
 
 namespace Verbara.Platform.Api.Tests.AgentAssist;
@@ -49,6 +50,9 @@ public sealed class AgentAssistTenantScopeApiFactory : AccountStatusApiFactory
 
     public FakeRecordReader Records { get; } = new();
 
+    /// <summary>When set, the Agent Assist feature store and toggle the host resolves (both are this instance).</summary>
+    internal IAgentAssistFeatureStore? FeatureStore { get; init; }
+
     /// <inheritdoc />
     protected override void ConfigureTestServices(IServiceCollection services)
     {
@@ -58,6 +62,14 @@ public sealed class AgentAssistTenantScopeApiFactory : AccountStatusApiFactory
         services.AddSingleton<IAgentAssistLiveSessions>(Live);
         services.RemoveAll<IAgentAssistRecordReader>();
         services.AddSingleton<IAgentAssistRecordReader>(Records);
+
+        if (FeatureStore is not null)
+        {
+            services.RemoveAll<IAgentAssistFeatureStore>();
+            services.AddSingleton(FeatureStore);
+            services.RemoveAll<IAgentAssistFeatureToggle>();
+            services.AddSingleton<IAgentAssistFeatureToggle>(FeatureStore);
+        }
 
         services.RemoveAll<IUserRoleStore>();
         services.AddSingleton<IUserRoleStore>(RoleTemplateGrants);

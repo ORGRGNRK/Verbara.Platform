@@ -13,16 +13,13 @@ namespace Verbara.Platform.Api.Services.AgentAssist;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Known limitation (Phase 1 / R5.1 Task J):</b> the toggle state lives on each API node.
-/// Multi-instance deployments therefore see per-node state divergence until the next restart
-/// (when config-file <see cref="AgentAssistOptions"/> re-seeds both nodes to the same baseline).
-/// A Postgres-backed toggle is tracked for R5.2 / follow-up.
-/// </para>
-/// <para>
-/// Parallels the pause-tracker in-memory fallback shipped in R5.1 Task I.
+/// <b>One replica only:</b> the state lives in this process, so it is used only by a host without the
+/// Platform database; with the database, <see cref="PostgresAgentAssistFeatureToggle"/> keeps one state
+/// for every replica. Every read here is direct, so the engine, the administrator's page and a
+/// session all see a change at once.
 /// </para>
 /// </remarks>
-public sealed class InMemoryAgentAssistFeatureToggle : IAgentAssistFeatureToggle
+public sealed class InMemoryAgentAssistFeatureToggle : IAgentAssistFeatureStore
 {
     private readonly AgentAssistOptions _seedOptions;
     private readonly AgentAssistCredentialsProtector _protector;
@@ -50,6 +47,13 @@ public sealed class InMemoryAgentAssistFeatureToggle : IAgentAssistFeatureToggle
         }
     }
 
+    /// <inheritdoc />
+    ValueTask<AgentAssistFeatureState> IAgentAssistFeatureStore.ReadAsync(CancellationToken ct) => GetCurrentAsync(ct);
+
+    /// <inheritdoc />
+    ValueTask<AgentAssistFeatureState> IAgentAssistFeatureStore.ReadForSessionAsync(CancellationToken ct) =>
+        GetCurrentAsync(ct);
+
     public ValueTask<AgentAssistFeatureState> SetAsync(AgentAssistFeatureState desired, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(desired);
@@ -68,44 +72,11 @@ public sealed class InMemoryAgentAssistFeatureToggle : IAgentAssistFeatureToggle
         {
             if (_seeded) return;
 
-            if (!_seedOptions.Enabled || string.IsNullOrWhiteSpace(_seedOptions.Provider))
-            {
-                _current = AgentAssistFeatureState.Disabled;
-            }
-            else
-            {
-                var plain = ExtractCredentials(_seedOptions);
-                var encrypted = plain.Count > 0 ? _protector.Protect(plain) : null;
-                _current = new AgentAssistFeatureState(
-                    Enabled: true,
-                    Provider: _seedOptions.Provider!.Trim().ToLowerInvariant(),
-                    ProtectedCredentials: encrypted,
-                    UpdatedAt: null,
-                    UpdatedBy: "appsettings");
-            }
+            // Off unless configuration enables a provider (no audit tag on the off state, as before).
+            var seed = AgentAssistFeatureSeed.FromOptions(_seedOptions, _protector, updatedAt: null);
+            _current = seed.Enabled ? seed : AgentAssistFeatureState.Disabled;
 
             _seeded = true;
         }
-    }
-
-    private static Dictionary<string, string> ExtractCredentials(AgentAssistOptions opts)
-    {
-        var creds = new Dictionary<string, string>(StringComparer.Ordinal);
-        var provider = opts.Provider?.Trim().ToLowerInvariant();
-        (string? ApiKey, string? Endpoint)? src = provider switch
-        {
-            "deepgram" => (opts.Deepgram.ApiKey, opts.Deepgram.Endpoint),
-            "whisper" => (opts.Whisper.ApiKey, opts.Whisper.Endpoint),
-            "azure-whisper" => (opts.Azure.ApiKey, opts.Azure.Endpoint),
-            "google" => (opts.Google.ApiKey, opts.Google.Endpoint),
-            _ => null,
-        };
-        if (src is not { } seed) return creds;
-
-        if (!string.IsNullOrWhiteSpace(seed.ApiKey))
-            creds["apiKey"] = seed.ApiKey;
-        if (!string.IsNullOrWhiteSpace(seed.Endpoint))
-            creds["endpoint"] = seed.Endpoint;
-        return creds;
     }
 }

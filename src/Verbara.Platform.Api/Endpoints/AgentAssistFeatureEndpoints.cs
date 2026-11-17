@@ -59,18 +59,20 @@ internal static class AgentAssistFeatureEndpoints
         group.MapPut("", UpdateFeature);
     }
 
+    // GET and PUT read the stored state directly, never the engine's cache, so a GET on any
+    // replica right after a PUT on another answers the new state.
     private static async Task<Ok<AgentAssistFeatureDto>> GetFeature(
-        [FromServices] IAgentAssistFeatureToggle toggle,
+        [FromServices] IAgentAssistFeatureStore toggle,
         CancellationToken ct)
     {
-        var state = await toggle.GetCurrentAsync(ct);
+        var state = await toggle.ReadAsync(ct);
         return TypedResults.Ok(ToDto(state));
     }
 
     private static async Task<Results<Ok<AgentAssistFeatureDto>, ValidationProblem>> UpdateFeature(
         HttpContext context,
         [FromBody] AgentAssistFeatureUpdateRequest body,
-        [FromServices] IAgentAssistFeatureToggle toggle,
+        [FromServices] IAgentAssistFeatureStore toggle,
         [FromServices] AgentAssistCredentialsProtector protector,
         [FromServices] ITenantStore tenantStore,
         [FromServices] IAuditService audit,
@@ -115,7 +117,7 @@ internal static class AgentAssistFeatureEndpoints
             });
         }
 
-        var previous = await toggle.GetCurrentAsync(ct);
+        var previous = await toggle.ReadAsync(ct);
 
         // Encrypt credentials before they enter the toggle state
         IReadOnlyDictionary<string, string>? encrypted = null;

@@ -766,13 +766,13 @@ builder.Services.AddSingleton<IJtiRevocationCache, InMemoryJtiRevocationCache>()
 // skip transcription at each session start.
 // Credentials are persisted through AgentAssistCredentialsProtector (DataProtection
 // purpose "AgentAssist.Credentials"); they never leave the API layer in plaintext.
-// Multi-instance limitation: state lives per-node; each API node re-seeds from
-// appsettings on restart. Postgres-backed variant tracked for R5.2.
+// The admin page and a session read IAgentAssistFeatureStore directly; the engine reads
+// IAgentAssistFeatureToggle, the same instance. In memory: one replica only.
 builder.Services.Configure<Verbara.Platform.Core.Configuration.AgentAssistOptions>(
     builder.Configuration.GetSection("AgentAssist"));
 builder.Services.AddSingleton<Verbara.Platform.Api.Services.AgentAssist.AgentAssistCredentialsProtector>();
-builder.Services.AddSingleton<Verbara.Sdk.Pro.AgentAssist.Features.IAgentAssistFeatureToggle,
-    Verbara.Platform.Api.Services.AgentAssist.InMemoryAgentAssistFeatureToggle>();
+builder.Services.AddSingleton<Verbara.Platform.Api.Services.AgentAssist.IAgentAssistFeatureStore, Verbara.Platform.Api.Services.AgentAssist.InMemoryAgentAssistFeatureToggle>();
+builder.Services.AddSingleton<Verbara.Sdk.Pro.AgentAssist.Features.IAgentAssistFeatureToggle>(sp => sp.GetRequiredService<Verbara.Platform.Api.Services.AgentAssist.IAgentAssistFeatureStore>());
 
 var jwtKeyDirectory = builder.Configuration["Auth:KeyDirectory"]
     ?? Path.Combine(builder.Environment.ContentRootPath, "data");

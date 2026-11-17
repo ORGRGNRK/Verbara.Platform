@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
+using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Api.Tests.AgentAssist;
 using Verbara.Sdk.Pro.AgentAssist.Features;
 using FluentAssertions;
@@ -39,6 +40,23 @@ public sealed class AgentAssistFeatureEndpointsTests : IClassFixture<AgentAssist
         // apiKeyMasked must be null OR "***", never the raw secret
         var masked = json["apiKeyMasked"];
         (masked is null || masked.GetValue<string>() == "***").Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetFeature_ShouldAnswerTheStoredState_NotTheEngineCache()
+    {
+        var store = new SplitFeatureStore();
+        await using var factory = new AgentAssistTenantScopeApiFactory { FeatureStore = store };
+        using var client = factory.PlatformOperatorClient();
+
+        var response = await client.GetAsync("/api/v1/admin/features/agent-assist");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        json["enabled"]!.GetValue<bool>().Should().BeTrue(
+            because: "the administrator's GET reads the stored state directly, never the engine's cached answer");
+        json["updatedBy"]!.GetValue<string>().Should().Be("stored");
+        store.EngineReads.Should().Be(0);
     }
 
     [Fact]
@@ -249,4 +267,32 @@ public sealed class AgentAssistFeatureEndpointsTests : IClassFixture<AgentAssist
         state.ProtectedCredentials!["endpoint"].Should().NotBe(endpoint,
             because: "the endpoint is encrypted like the key");
     }
+}
+
+/// <summary>
+/// A feature store whose engine-path answer (<c>GetCurrentAsync</c>) differs from the stored state (<c>ReadAsync</c>),
+/// as a replica's engine cache does for up to five seconds after another replica's write.
+/// </summary>
+internal sealed class SplitFeatureStore : IAgentAssistFeatureStore
+{
+    private static readonly AgentAssistFeatureState Stored = new(
+        Enabled: true, Provider: "deepgram", ProtectedCredentials: null, UpdatedAt: DateTimeOffset.UnixEpoch, UpdatedBy: "stored");
+
+    private int _engineReads;
+
+    public int EngineReads => Volatile.Read(ref _engineReads);
+
+    public ValueTask<AgentAssistFeatureState> GetCurrentAsync(CancellationToken ct = default)
+    {
+        Interlocked.Increment(ref _engineReads);
+        return ValueTask.FromResult(AgentAssistFeatureState.Disabled);
+    }
+
+    public ValueTask<AgentAssistFeatureState> ReadAsync(CancellationToken ct = default) => ValueTask.FromResult(Stored);
+
+    public ValueTask<AgentAssistFeatureState> ReadForSessionAsync(CancellationToken ct = default) =>
+        ValueTask.FromResult(Stored);
+
+    public ValueTask<AgentAssistFeatureState> SetAsync(AgentAssistFeatureState desired, CancellationToken ct = default) =>
+        ValueTask.FromResult(desired);
 }
