@@ -257,6 +257,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pending are not analysed.
 - **Read call-analysis saturation from `callanalytics.saturated`.** An operator dashboard or alert outside this repo
   that read saturation from `callanalytics.skipped.by_filter` must move to `callanalytics.saturated`.
+- **Migration `031` runs at start-up**: it adds two empty tables for Agent Assist, `agent_assist_feature_state` (the
+  deployment's one feature state, shared by every replica) and `agent_assist_call_claims` (one row per call with a live
+  Agent Assist session). Only new tables are created, so no existing table is locked or read. It is additive; a rollback
+  to the previous image leaves both tables unused.
 
 ## [2.39.1] - 2026-11-10
 
