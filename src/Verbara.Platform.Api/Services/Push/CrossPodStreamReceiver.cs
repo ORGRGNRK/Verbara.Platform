@@ -54,7 +54,7 @@ internal sealed partial class CrossPodStreamReceiver : IHostedService, IDisposab
     /// <inheritdoc />
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _subscription = _bus.OfType<RemotePushEvent>().Subscribe(Receive);
+        _subscription = _bus.OfType<RemotePushEvent>().Subscribe(envelope => TryAccept(envelope));
         return Task.CompletedTask;
     }
 
@@ -65,17 +65,20 @@ internal sealed partial class CrossPodStreamReceiver : IHostedService, IDisposab
         return Task.CompletedTask;
     }
 
-    /// <summary>Handles one envelope; never throws (it runs on the bus's dispatch loop).</summary>
-    internal void Receive(RemotePushEvent envelope)
+    /// <summary>
+    /// Handles one envelope: <see langword="true"/> when its event was handed to the live streams, else
+    /// <see langword="false"/>. Never throws (it runs on the bus's dispatch loop).
+    /// </summary>
+    internal bool TryAccept(RemotePushEvent envelope)
     {
         if (!Types.TryGetValue(envelope.OriginalEventType, out var typeInfo) || !_feed.HasSubscribers)
-            return;
+            return false;
 
         if (envelope.RawPayload.Length == 0)
         {
             _metrics.Record(CrossPodStreamMetrics.EmptyPayload);
             Log.EmptyPayload(_logger, envelope.OriginalEventType, envelope.SourceNodeId);
-            return;
+            return false;
         }
 
         PlatformEvent? decoded;
@@ -92,14 +95,14 @@ internal sealed partial class CrossPodStreamReceiver : IHostedService, IDisposab
         if (decoded is null || !string.Equals(decoded.Type, envelope.OriginalEventType, StringComparison.Ordinal))
         {
             _metrics.Record(CrossPodStreamMetrics.DecodeError);
-            return;
+            return false;
         }
 
         if (!string.Equals(envelope.Metadata?.TenantId, decoded.TenantId, StringComparison.Ordinal))
         {
             _metrics.Record(CrossPodStreamMetrics.TenantMismatch);
             Log.TenantMismatch(_logger, envelope.OriginalEventType, envelope.Metadata?.TenantId, decoded.TenantId);
-            return;
+            return false;
         }
 
         try
@@ -113,6 +116,7 @@ internal sealed partial class CrossPodStreamReceiver : IHostedService, IDisposab
         }
 
         _metrics.Record(CrossPodStreamMetrics.Delivered);
+        return true;
     }
 
     /// <inheritdoc />
