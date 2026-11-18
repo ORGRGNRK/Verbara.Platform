@@ -646,3 +646,8 @@ jobs:
         uses: actions/checkout@v7
       - name: Endpoint invariant gates (empty-catch + LOC budgets)
         run: python3 scripts/check-endpoint-invariants.py
+      # Every compose pair that runs more than one platform-api replica puts each replica on the Redis push
+      # backplane (the same ConnectionStrings__Redis as realtime, a healthy redis dependency, redis not behind a
+      # profile). Reads the rendered merge (`docker compose config`), so an edit to either file is seen.
+      - name: Scale overlay backplane
+        run: python3 scripts/check-scale-backplane.py
