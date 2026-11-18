@@ -148,6 +148,39 @@ class CheckAgentAssistK8sTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("r55-asterisk", r.stdout)
 
+    def test_fails_when_the_rule_also_admits_every_pod_of_the_platform_namespace(self):
+        r = self._run(policy=_POLICY.replace(
+            "              kubernetes.io/metadata.name: r55-asterisk\n",
+            "              kubernetes.io/metadata.name: r55-asterisk\n        - podSelector: {}\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("from a source beyond namespace r55-asterisk: {'podSelector': {}}", r.stdout)
+
+    def test_fails_when_the_rule_also_admits_every_namespace(self):
+        r = self._run(policy=_POLICY.replace(
+            "              kubernetes.io/metadata.name: r55-asterisk\n",
+            "              kubernetes.io/metadata.name: r55-asterisk\n        - namespaceSelector: {}\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("from a source beyond namespace r55-asterisk: {'namespaceSelector': {}}", r.stdout)
+
+    def test_fails_when_the_rule_also_admits_an_ip_block(self):
+        r = self._run(policy=_POLICY.replace(
+            "              kubernetes.io/metadata.name: r55-asterisk\n",
+            "              kubernetes.io/metadata.name: r55-asterisk\n        - ipBlock:\n            cidr: 0.0.0.0/0\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("from a source beyond namespace r55-asterisk: {'ipBlock'", r.stdout)
+
+    def test_fails_when_another_rule_admits_the_port_from_every_source(self):
+        r = self._run(policy=_POLICY + "    - ports:\n        - protocol: TCP\n          port: 9093\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("from a source beyond namespace r55-asterisk: no 'from' (every source)", r.stdout)
+
+    def test_passes_when_a_pod_selector_narrows_the_asterisk_peer(self):
+        r = self._run(policy=_POLICY.replace(
+            "              kubernetes.io/metadata.name: r55-asterisk\n",
+            "              kubernetes.io/metadata.name: r55-asterisk\n          podSelector:\n"
+            "            matchLabels:\n              app: asterisk\n"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_fails_when_the_policy_selects_another_workload(self):
         r = self._run(policy=_POLICY.replace("app.kubernetes.io/name: platform-api", "app.kubernetes.io/name: web"))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)

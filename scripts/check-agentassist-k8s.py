@@ -10,7 +10,9 @@ The shipped files keep that path open when:
     which must be set;
   - one `r55-platform` NetworkPolicy in --manifest (default infra/k8s/manifests/network-policies.yaml) selects
     `app.kubernetes.io/name: platform-api` and admits TCP on that port (by number, or by the container port's name)
-    from a namespaceSelector on `kubernetes.io/metadata.name: r55-asterisk` (the default-deny drops it otherwise);
+    from a namespaceSelector on `kubernetes.io/metadata.name: r55-asterisk` (the default-deny drops it otherwise), and
+    no rule of a platform-api policy there that names the port admits it from anything else: every `from` peer selects
+    the r55-asterisk namespace (a podSelector beside it only narrows it), and a rule with no `from` admits every source;
   - `helm template <chart>` (or --rendered FILE) renders a platform-api Deployment whose `api` container declares that
     containerPort, takes POD_IP from `status.podIP`, sets AgentAssist__AudioSocket__AdvertisedHost (non-blank) and
     AgentAssist__AudioSocket__Port equal to the port;
@@ -97,14 +99,16 @@ def render(chart):
     return r.stdout
 
 
-def _admits(rule, port, port_names):
-    sources = rule.get("from") or []
-    from_asterisk = any(
-        ((src.get("namespaceSelector") or {}).get("matchLabels") or {}).get("kubernetes.io/metadata.name")
-        == _FROM_NAMESPACE
-        for src in sources if isinstance(src, dict))
-    if not from_asterisk:
+def _from_asterisk(peer):
+    """A `from` peer that selects the r55-asterisk namespace only (a podSelector in the same peer narrows it; the API
+    server refuses an ipBlock beside a selector, so an ipBlock peer has no namespaceSelector and fails here)."""
+    if not isinstance(peer, dict):
         return False
+    ns = peer.get("namespaceSelector")
+    return isinstance(ns, dict) and ((ns.get("matchLabels") or {}).get("kubernetes.io/metadata.name") == _FROM_NAMESPACE)
+
+
+def _names_port(rule, port, port_names):
     for p in rule.get("ports") or []:
         if not isinstance(p, dict) or (p.get("protocol") or "TCP") != "TCP":
             continue
@@ -113,7 +117,24 @@ def _admits(rule, port, port_names):
     return False
 
 
+def _admits(rule, port, port_names):
+    sources = rule.get("from") or []
+    return any(_from_asterisk(src) for src in sources) and _names_port(rule, port, port_names)
+
+
+def _wider_sources(rule, port, port_names):
+    """The peers of a rule naming the port that admit more than r55-asterisk; a rule with no `from` admits all."""
+    if not _names_port(rule, port, port_names):
+        return []
+    sources = rule.get("from")
+    if not sources:
+        return ["no 'from' (every source)"]
+    return [repr(src) for src in sources if not _from_asterisk(src)]
+
+
 def check_policy(docs, where, port, port_names):
+    failures = []
+    admitted = False
     for d in docs:
         if d.get("kind") != "NetworkPolicy" or (d.get("metadata") or {}).get("namespace") != _NAMESPACE:
             continue
@@ -121,10 +142,18 @@ def check_policy(docs, where, port, port_names):
         labels = ((spec.get("podSelector") or {}).get("matchLabels")) or {}
         if labels.get(_API_LABEL[0]) != _API_LABEL[1]:
             continue
-        if any(_admits(rule, port, port_names) for rule in spec.get("ingress") or [] if isinstance(rule, dict)):
-            return []
-    return [f"{where}: no {_NAMESPACE} NetworkPolicy admits TCP {port} to {_API_LABEL[0]}={_API_LABEL[1]} "
-            f"from namespace {_FROM_NAMESPACE} (expected policy allow-agentassist-audio)"]
+        name = (d.get("metadata") or {}).get("name")
+        for rule in spec.get("ingress") or []:
+            if not isinstance(rule, dict):
+                continue
+            admitted = admitted or _admits(rule, port, port_names)
+            for wider in _wider_sources(rule, port, port_names):
+                failures.append(f"{where}: NetworkPolicy {name} admits TCP {port} to {_API_LABEL[0]}={_API_LABEL[1]} "
+                                f"from a source beyond namespace {_FROM_NAMESPACE}: {wider}")
+    if not admitted:
+        failures.insert(0, f"{where}: no {_NAMESPACE} NetworkPolicy admits TCP {port} to {_API_LABEL[0]}={_API_LABEL[1]} "
+                           f"from namespace {_FROM_NAMESPACE} (expected policy allow-agentassist-audio)")
+    return failures
 
 
 def _containers(doc):
