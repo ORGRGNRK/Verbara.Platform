@@ -50,6 +50,8 @@ services:
     ports: !reset []
     environment:
       # Inherits all values from full.yml; the keys below are merged in.
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      AgentAssist__AudioSocket__AdvertisedHost: auto
       Identity__JwtKeyRotation__UseRotationPool: "true"
       Identity__JwtKeyRotation__RequireRedisStore: "true"
       # v1.14.4 (MFA-007) — companion flag covering MFA + password-reset +

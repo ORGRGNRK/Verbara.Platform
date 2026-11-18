@@ -44,6 +44,8 @@ services:
     # /health/ready is reachable without booting the Asterisk/pstn-emulator
     # services at all.
     environment:
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      AgentAssist__AudioSocket__AdvertisedHost: auto
       Asterisk__Ami__Hostname: ""
       Asterisk__Ari__BaseUrl: ""
     # Binary readiness (ADR-0004 determinism fences): the demo compose's own

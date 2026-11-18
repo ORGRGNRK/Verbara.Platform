@@ -31,7 +31,6 @@ services:
       - "8089:8089"
       - "8180:8180"
       - "5038:5038"
-      - "9092:9092"
       - "20000-20200:20000-20200/udp"
     depends_on:
       postgres:
@@ -61,6 +60,8 @@ services:
     ports:
       - "5000:5000"
     environment:
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      AgentAssist__AudioSocket__AdvertisedHost: auto
       ASPNETCORE_ENVIRONMENT: Production
       ConnectionStrings__Postgres: Host=postgres;Database=verbara;Username=platform;Password=${POSTGRES_PASSWORD:-platform_secret}
       Asterisk__Ami__Hostname: asterisk

@@ -43,6 +43,8 @@
 services:
   platform-api:
     environment:
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      AgentAssist__AudioSocket__AdvertisedHost: auto
       # ADR-0015 Phase 2 — explicit pool sizing on the shared NpgsqlDataSource
       # (Pro 1.16.0-pro overload, v1.14.6). Phase 1's per-pool sprawl is
       # eliminated; this connection string now drives ONE pool serving all

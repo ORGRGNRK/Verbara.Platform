@@ -32,6 +32,8 @@ services:
     ports:
       - "5000:5000"
     environment:
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      - AgentAssist__AudioSocket__AdvertisedHost=auto
       - ASPNETCORE_ENVIRONMENT=Production
       # The gateway puts the visitor's address in X-Forwarded-For; the API believes it only
       # from these networks. Without it every visitor shares the gateway's address, and the

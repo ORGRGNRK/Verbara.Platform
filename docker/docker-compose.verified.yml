@@ -44,6 +44,8 @@ services:
     image: ghcr.io/verbara/platform/api@sha256:REPLACE_WITH_MANIFEST_LIST_DIGEST
     restart: unless-stopped
     environment:
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      AgentAssist__AudioSocket__AdvertisedHost: auto
       ASPNETCORE_URLS: http://+:5000
       # The running image's digest, for Pro (Pro/ADR-0011). Pro compares it
       # only with a licence that lists image digests — licences issued since
