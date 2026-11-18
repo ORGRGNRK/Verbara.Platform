@@ -232,10 +232,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     upgrade; nothing back-fills older rows (`CallAnalyticsQueueFilterLiveDbTests`).
 - **Pro `2.28.0-pro` reaches Platform** through the Agent Assist engine and the Redis push backplane the Api and
   Realtime register:
-  - The Agent Assist engine stays inert. The Api configures no AudioSocket advertised address, so with the runtime
-    toggle on each connected call stops before any snoop, ARI request or speech recognizer and is counted in
+  - The Agent Assist engine creates a snoop only with an advertised AudioSocket address, which the Api now sets from
+    `AgentAssist:AudioSocket:AdvertisedHost` (read **Fixed**). With none set, or `auto` finding no route, each connected
+    call with the runtime toggle on stops before any snoop, ARI request or speech recognizer and is counted in
     `agentassist.sessions.skipped` with `reason` `no_advertised_address`, with one Warning per engine lifetime. Before,
-    it created snoops that never produced a session (`AgentAssistInertOnMainTests`).
+    it created snoops that never produced a session.
   - Cross-node push events (agent, conversation and cluster state) reach the receiving node's event bus in publish
     order; before, two events from one node could reach it swapped (`PlatformPushRelayOrderLiveTests`). The order from
     that bus to SignalR clients is not asserted.
