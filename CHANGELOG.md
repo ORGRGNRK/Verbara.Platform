@@ -141,6 +141,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   audio address, resolved when the first call needs it (`auto`: the replica's own address on its route to Asterisk).
   When no address is set or `auto` finds no route, the Api still starts; each call is then skipped and counted, and a
   Warning is logged once.
+- **The shipped deployment files carry the Agent Assist audio path.** The `[agentassist]` context of
+  `docker/asterisk-config/extensions.conf` (and of the demo override) appended `:9092` to `AUDIOSOCKET_HOST`, which
+  now already holds `host:port`, so Asterisk dialled an address that does not exist; it now reads
+  `AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST})`. Every compose file that defines the `platform-api`
+  environment sets `AgentAssist__AudioSocket__AdvertisedHost: auto`, and `docker-compose.full.yml` no longer
+  publishes `9092` on Asterisk, where nothing listens. The Helm chart takes `POD_IP` from `status.podIP`, sets the
+  advertised host from the new value `api.agentAssist.advertisedHost` (default `$(POD_IP)`), declares the audio port
+  as `containerPort` `aa-audio` from `api.agentAssist.audioSocketPort` (default `9093`), and takes an optional
+  `api.agentAssist.hostPort`. `infra/k8s/manifests/network-policies.yaml` gains `allow-agentassist-audio`, which
+  admits TCP 9093 to `platform-api` from the `r55-asterisk` namespace; the `r55-platform` default-deny dropped that
+  connection before. `docker/docker-compose.scale.yml` sets `ConnectionStrings__Redis` on `platform-api` (the Redis
+  Realtime uses), so its replicas join the push backplane and Agent Assist results reach an agent on any replica.
+  Two new CI checks keep these in place: `scripts/check-scale-backplane.py` and `scripts/check-agentassist-k8s.py`.
+  Deepgram transcription is verified against a protocol fake only, not against Deepgram's live service; setup in
+  `docs/operations/agentassist-setup.md`.
 - New counters on `/metrics`: `platform_agentassist_call_claim_total{outcome}`,
   `platform_agentassist_toggle_stale_total{path}` and `platform_agentassist_recognizer_unavailable_total{reason}`.
 - `GET /api/v1/analytics/cdr/{sessionId}` always answers `hasTranscript` false. It used to answer true for any call
@@ -309,6 +324,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrading
 
+- **A customised `[agentassist]` dialplan context must drop its port.** Each snoop's `AUDIOSOCKET_HOST` now holds
+  `host:port`, the address of the Api replica that created it. A context that still reads
+  `AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST}:9092)`, or adds any port, makes every snoop's address
+  unreachable and no call is transcribed. Copy the context of `docker/asterisk-config/extensions.conf` verbatim:
+  `exten => audiosocket,1,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST})` then `same => n,Hangup()`. Set
+  `AgentAssist__AudioSocket__AdvertisedHost` on every Api replica (`auto` in the shipped compose files, the pod IP in
+  the chart); without it no snoop is created. On Kubernetes, apply `allow-agentassist-audio` from
+  `infra/k8s/manifests/network-policies.yaml`, or Asterisk's connection to the audio port is dropped. With more than
+  one Api replica, set `ConnectionStrings__Redis` on every replica (the chart and `docker-compose.scale.yml` do).
+- **Match the node Stasis app by prefix.** A tool or alert that looked for `verbara-node` (or another
+  `Asterisk:Ari:NodeApplication`) by its exact name must match `verbara-node*`: each replica now registers it with its
+  machine name appended.
 - **An Agent Assist session whose call carries no tenant is no longer listed.** A call that arrives on a trunk without
   the `TENANT_ID` channel variable has no tenant, so its Agent Assist session is missing from
   `GET /api/v1/supervisor/sessions/active` and answers 404 to whisper and transcript listen. Set `TENANT_ID` on every
