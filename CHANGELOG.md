@@ -143,7 +143,6 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Warning is logged once.
 - New counters on `/metrics`: `platform_agentassist_call_claim_total{outcome}`,
   `platform_agentassist_toggle_stale_total{path}` and `platform_agentassist_recognizer_unavailable_total{reason}`.
-
 - `GET /api/v1/analytics/cdr/{sessionId}` always answers `hasTranscript` false. It used to answer true for any call
   with an analysis summary, although no transcript route is served, so a client that followed it got 404.
 - The analytics endpoints read a date-only `to` (`2026-11-10`) as the whole of that UTC day. Before, it was that day's
@@ -269,8 +268,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     executor's circuit state or its trip counter.
   - **Campaign outcomes are looked up on the node the call was dialed on.** The dialer's node id and the cluster's
     server key are the same string, so a single-node deployment finds the same calls (`DialerHostExtensionsTests`).
-  - Inert on Platform: the snoop filter at reconstruction (Platform creates no snoop), the RTP quality conversion (no
-    caller), a call's direction after a rebuild (unchanged), and the release's test-only and pin-only items.
+  - **A takeover does not rebuild an Agent Assist snoop as a call.** Now that the Api creates snoops (see above), a
+    `Snoop/` channel is no longer rebuilt as a call leg, and a linked id whose live channels are all snoops gets no
+    session; a takeover on an Agent Assist host rebuilds only the real calls.
+  - Inert on Platform: the RTP quality conversion (no caller), a call's direction after a rebuild (unchanged), and the
+    release's test-only and pin-only items.
 - **A paused `app_agent_pool` agent is a known limitation of Pro `2.29.0-pro`** (its "Known limitations" entry, Sdk
   #541), and the limitation stays: no Pro release fixes it. A later Pro release removes both the agent-state push
   bridge and the skill-based agent selector, after a separate Platform change stops registering the bridge. Platform
