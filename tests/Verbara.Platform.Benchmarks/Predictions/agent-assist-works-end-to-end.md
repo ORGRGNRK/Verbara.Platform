@@ -1,15 +1,34 @@
-# Measurement plan: agent-assist-works-end-to-end (frozen before any run)
+# Measurement plan: agent-assist-works-end-to-end (re-frozen after the flip, before the re-measure)
 
 The M-cost gate of OpenSpec change `agent-assist-works-end-to-end`, task C.4 (design D15; verbara-meta/ADR-0030
 decision 2): `CrossPodStreamCostBench`, legs `LocalEvent`, `ReceivedEnvelope` and `BridgeEmission`, modes `a`, `b`
-and the control `n`. This file is committed before any run of the benchmark, and it is not edited after. Bytes decide
-and time informs. Every run goes under `verbara-meta/scripts/xr-heavy-lock.sh`.
+and the control `n`. Bytes decide and time informs. Every run goes under `verbara-meta/scripts/xr-heavy-lock.sh`.
 
 The text between the two markers is a verbatim copy of design D15's M-cost plan. Its sha256 is
-`aafc5c99699857eae21f4ca89fcc0038ec58d52ddae3166f0f57fe2f1c5eacbd`. Re-check it before a run:
+`65793dfe9621b8323105b53c523a39b3ccb3293226b45efd912874d46dc931ed`. Re-check it before a run:
 
     awk '/^<!-- frozen-plan:begin -->$/{f=1;next} /^<!-- frozen-plan:end -->$/{f=0} f' \
       tests/Verbara.Platform.Benchmarks/Predictions/agent-assist-works-end-to-end.md | sha256sum
+
+## Supersedes the first freeze
+
+This freeze supersedes the first one, committed in f8be3d95 before any run, whose block had sha256
+`aafc5c99699857eae21f4ca89fcc0038ec58d52ddae3166f0f57fe2f1c5eacbd`. The two blocks differ in one sentence only: the
+`ReceivedEnvelope` envelope is now described as built the way the Pro relay's subscription builds it, without naming
+a file of that repository. The predictions, the flip rules and the thresholds are unchanged.
+
+The first freeze's ABAB (A1, B1, A2, B2 and the control N, SDK 10.0.404, runtime 10.0.15, X64 AVX-512, BenchmarkDotNet
+0.14.0 ShortRun) fired the `BridgeEmission` flip rule. Bytes per op, the same at 1 and 50 streams in every run:
+`BridgeEmission` A 632, B 1664, N 1920, so B − A = 1032 B per op = 258 B per event in both B runs (prediction ≤ 64 B,
+flip over 256 B); time B − A 85 ns per event. The two other legs held: `LocalEvent` A 0, B 0, N 192 / 9600 (B − A 0 B,
+9.3 ns per event and stream); `ReceivedEnvelope` A 0, B 6440, N 14984 / 27528 (1610 B per envelope, 0 B growth from 1
+to 50 streams, 2.03 µs per envelope). Every control amount showed exactly.
+
+The flip rule's remedy, applied before this freeze: the bound emission path built each event twice (the factory's
+record, then a `with { Timestamp = … }` copy) and allocated a closure and its delegate per emission. The bridge's four
+factories are now static and receive the engine's payload and the emission time, so the record is built once, with its
+timestamp, and nothing else is allocated per emission. This freeze is committed before any run of the re-measure, and
+it is not edited after.
 
 <!-- frozen-plan:begin -->
 **M-cost** (ADR-0030 decision 2; spec audit round 2, F4 and the missed P2). D12 adds two costs that are paid **per
@@ -43,8 +62,8 @@ real pipeline and an interleaved ABAB of it, **unconditional**, as a C.4 gate.
   - **`LocalEvent`**: one local `agentassist.transcript`, a `conversation.message` and a non-content
     `conversation.state_changed` published on the bus per op. Mode `a` subscribes through `StreamSource(bus, null)`,
     main's source. Mode `b` subscribes through `StreamSource(bus, feed)`, the candidate's.
-  - **`ReceivedEnvelope`**: one envelope of each of the four `agentassist.*` types per op, built as
-    `RedisEventRelay.cs:179-191` builds it from `PlatformPushJsonContext` serialization of the fixture's example
+  - **`ReceivedEnvelope`**: one envelope of each of the four `agentassist.*` types per op, built as the Pro relay's
+    subscription builds it from `PlatformPushJsonContext` serialization of the fixture's example
     values, with a 120-character `text`. Mode `a` gives the receiver envelopes of a non-`agentassist` type, which it
     drops at the type check (today's cost: no decode). Mode `b` gives it the four `agentassist.*` envelopes, which it
     decodes and emits on the feed to the 50 streams. Run at 50 streams and, as information, at 1 stream.
