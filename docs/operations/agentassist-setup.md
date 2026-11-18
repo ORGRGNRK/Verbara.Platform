@@ -37,9 +37,10 @@ The Helm chart (`infra/k8s/helm/platform`) sets the address from `api.agentAssis
 `api.agentAssist.audioSocketPort` (default `9093`). No Service fronts the port: Asterisk connects to the pod that
 created the snoop. The `r55-platform` default-deny policy drops that connection unless the policy
 `allow-agentassist-audio` of `infra/k8s/manifests/network-policies.yaml` is applied: it admits TCP 9093 to
-`platform-api` from the `r55-asterisk` namespace. If you change the port, change it in that policy too. An Asterisk
-outside the pod network cannot reach the pod IP: set `api.agentAssist.advertisedHost` to the node's address and
-`api.agentAssist.hostPort` to the port. That layout is documented, not tested.
+`platform-api` from the `r55-asterisk` namespace. If you change the port, change it in that policy too. The chart
+supports an Asterisk that runs in the cluster's `r55-asterisk` namespace only: the policy admits no other source, and
+`api.agentAssist.advertisedHost` is one value for every replica, so a literal address in it names the right replica
+only when there is one.
 
 The Api never fails to start over the address. When it is not set, or `auto` finds no route, each call is skipped
 (no snoop is created), counted as `agentassist_sessions_skipped_total{reason="no_advertised_address"}`, and one

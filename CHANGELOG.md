@@ -148,8 +148,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   environment sets `AgentAssist__AudioSocket__AdvertisedHost: auto`, and `docker-compose.full.yml` no longer
   publishes `9092` on Asterisk, where nothing listens. The Helm chart takes `POD_IP` from `status.podIP`, sets the
   advertised host from the new value `api.agentAssist.advertisedHost` (default `$(POD_IP)`), declares the audio port
-  as `containerPort` `aa-audio` from `api.agentAssist.audioSocketPort` (default `9093`), and takes an optional
-  `api.agentAssist.hostPort`. `infra/k8s/manifests/network-policies.yaml` gains `allow-agentassist-audio`, which
+  as `containerPort` `aa-audio` from `api.agentAssist.audioSocketPort` (default `9093`).
+  `infra/k8s/manifests/network-policies.yaml` gains `allow-agentassist-audio`, which
   admits TCP 9093 to `platform-api` from the `r55-asterisk` namespace; the `r55-platform` default-deny dropped that
   connection before. `docker/docker-compose.scale.yml` sets `ConnectionStrings__Redis` on `platform-api` (the Redis
   Realtime uses), so its replicas join the push backplane and Agent Assist results reach an agent on any replica.

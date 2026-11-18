@@ -96,9 +96,6 @@ spec:
             - name: aa-audio
               containerPort: {{ .Values.api.agentAssist.audioSocketPort }}
               protocol: TCP
-              {{- if .Values.api.agentAssist.hostPort }}
-              hostPort: {{ .Values.api.agentAssist.hostPort }}
-              {{- end }}
           env:
             # This pod's address, for the Agent Assist advertised host below ($(POD_IP) needs it defined first).
             - name: POD_IP
