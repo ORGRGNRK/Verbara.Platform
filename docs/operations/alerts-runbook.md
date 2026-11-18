@@ -13,7 +13,7 @@ entry below following the same `### <AlertName>` format with **What** / **Why**
 | Tier | Operator action | Examples |
 |---|---|---|
 | **P0** | **Page on-call.** Customer impact or outage imminent. Your SLA clock (if you offer one to your customers) is running. | API down, JWT validation failing, license guard blocking pipeline, retention service stalled. |
-| **P1** | **Ticket within 24h.** SLO breach, no customer-visible outage. | Circuit open > 5 min, SLO breach without P0 trigger, audit pipeline degraded. |
+| **P1** | **Ticket within 24h.** SLO breach, no customer-visible outage. | Circuit tripped twice in 10 min, SLO breach without P0 trigger, audit pipeline degraded. |
 | **P2** | **Review weekly.** Capacity / hygiene. Aggregate during weekly SRE sync. | Pool > 80%, slow queries, retention divergence. |
 
 ---
@@ -164,9 +164,17 @@ entry below following the same `### <AlertName>` format with **What** / **Why**
 
 ### CircuitBreakerOpen
 
-**What:** Any keyed `Verbara.Sdk.Resilience.circuit.state` value 2 (Open) for ≥ 5 min.
+**What:** One keyed circuit opened at least twice inside the rule's window on one instance: `max by (key) (increase(circuit_opened_total[10m])) >= 2`, firing on the first evaluation that reads it (`for: 0m`). The source is the `Verbara.Sdk.Resilience` `circuit.opened` counter, one increment per trip. The window is about 9 m 45 s, not ten minutes: at a 15 s scrape the `[10m]` range holds 40 samples, and two trips count only while the last sample taken before the first trip is still one of them.
 
-**Why:** A downstream dependency is failing repeatedly and the policy is now rejecting all traffic to give it room to recover.
+**Why:** A downstream dependency is failing repeatedly: either the probe after a full open window failed and the circuit opened again, or the key recovered and failed past its threshold again. Since Sdk 2.10 the `circuit.state` gauge reads half-open (1) once the open window ends, so a sustained outage cycles between open and half-open and never holds open (2) for five minutes; the rule counts trips instead.
+
+The count is per instance: trips of one key on different pods do not add up, so one blip that trips each replica once does not page, and a key in an outage on several pods pages once. The alert carries only `key`; find the instance with `increase(circuit_opened_total{key="…"}[10m])`. These cases do not page:
+
+- A series that first appears at its first trip: Prometheus cannot count that first increment, so the alert fires one trip later than it would on an established series.
+- A key that a pod calls less than twice in ten minutes, or whose open window is ten minutes or longer (the hourly worker policy's is 600 s), cannot trip twice in the window.
+- A process restart that keeps the series' labels resets the counter, and Prometheus sees the reset only when the first value after it is lower than the last one before it. A key that had tripped once before the restart starts again at 1, so the reset is not seen and two trips after the restart count as one. A key that had tripped more than once before the restart is counted correctly. A restart under a new pod name is a new series, the first case above.
+
+The rule's tests are in [`alerts.test.yml`](alerts.test.yml): run `promtool test rules alerts.test.yml` from `docs/operations` (its header says how to run them against the r55 manifest).
 
 **First response:**
 - Cross-reference policy key against [`resilience-runbook.md`](resilience-runbook.md) policy catalogue.
@@ -208,7 +216,7 @@ entry below following the same `### <AlertName>` format with **What** / **Why**
 - **Readiness, the HTTP plane, on `/health/ready`:** `postgres`, `retention`, `services` (the digital background-service heartbeats), `dialer-engine`, `csatrunner-orchestrator` and `analytics-live-queue-writer`. One of them Unhealthy makes the readiness probe answer 503, and the pod leaves the Service.
 - **The voice plane, on `/health/voice`:** `asterisk` (this pod's primary AMI connection and the Stasis inbound worker's heartbeat) and the session-fed Pro engines `eventstore-subscriber`, `analytics-aggregator`, `callanalytics-engine` and `agentassist-engine`. No probe reads this endpoint, so a voice-plane check never drains the pod. While AMI is down, voice transfer and click-to-dial answer 503 `voice-unavailable` with `Retry-After: 30`.
 
-A dependency circuit (`webhook.delivery`, `oidc.token-exchange`) never makes a check Unhealthy: an open one shows as `services` `Degraded` (see [CircuitBreakerOpen](#circuitbreakeropen)).
+A dependency circuit (`webhook.delivery`, `oidc.token-exchange`) never makes a check Unhealthy: an open or half-open one shows as `services` `Degraded` until a successful call closes it (see [CircuitBreakerOpen](#circuitbreakeropen)).
 
 **First response:**
 - Look up the health check by `name` label.
@@ -269,7 +277,7 @@ A dependency circuit (`webhook.delivery`, `oidc.token-exchange`) never makes a c
 **First response:**
 - Inspect `live_queue.snapshots.write_error` counter `reason` tag — narrows to `timeout` / `circuit_open` / `exception`.
 - Check `analytics-live-queue-writer` health check status.
-- For `circuit_open`: cross-reference with CircuitBreakerOpen P1 alert.
+- For `circuit_open`: cross-reference with the CircuitBreakerOpen P1 alert, which fires only once `analytics.live-queue-writer` has tripped twice in 10 min on one instance; for a single trip, read `increase(circuit_opened_total{key="analytics.live-queue-writer"}[10m])`.
 - For `exception`: tail platform-api logs grep `LiveQueueSnapshotWriter`.
 
 ### RedisMemoryHigh
