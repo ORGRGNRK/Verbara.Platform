@@ -1,5 +1,6 @@
 // Verbara.Platform.Benchmarks — agent-assist-works-end-to-end task C.4, the M-cost gate of design D15 (frozen plan:
-// Predictions/agent-assist-works-end-to-end.md, sha256 aafc5c99…; verbara-meta/ADR-0030 decision 2).
+// Predictions/agent-assist-works-end-to-end.md, re-frozen after the BridgeEmission flip, sha256 65793dfe…, superseding
+// aafc5c99…; verbara-meta/ADR-0030 decision 2). Reports the median beside the mean (D15 names the median).
 //
 // Drives the shipped code, never a copy: SseEndpoints.StreamSource / SubscribeDeliverable (the live stream's source and
 // its delivery `.Where` + channel write), CrossPodStreamReceiver.TryAccept (one received envelope) and the bridge's
@@ -56,6 +57,7 @@ using Verbara.Sdk.Sessions;
 namespace Verbara.Platform.Benchmarks;
 
 [MemoryDiagnoser]
+[MedianColumn]
 [ShortRunJob]
 public class CrossPodStreamCostBench
 {
@@ -156,21 +158,16 @@ public class CrossPodStreamCostBench
         var supervisor = Own(new AgentAssistSupervisor());
         _bridge = Own(new AgentAssistBridge(supervisor, _bridgeBus, store, NullLogger<AgentAssistBridge>.Instance));
 
-        // The bound session: its tenant known from the start, its conversation resolved before the first op.
+        // The bound session: its tenant known from the start, its conversation resolved before the first op. The lookup's
+        // answer is an already-completed task, so Attach's first lookup resolves the conversation before it returns, and
+        // the first emission is the causal signal: it is published bound, or the setup is wrong (no wait, no retry).
         _bound = Own(new BenchSession(SessionId, Call(Tenant)));
         _bridge.Attach(_bound.Feed);
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (true)
-        {
-            var before = _recorded;
-            _bound.Say();
-            if (_recorded == before + 1 && _last is AgentAssistTranscriptEvent { ConversationId: ConversationId, TenantId: Tenant } t
-                && t.AgentId == AgentGuid)
-                break;
-            if (DateTime.UtcNow > deadline)
-                throw new InvalidOperationException("The bench session never bound its tenant, agent and conversation.");
-            Thread.Sleep(10);
-        }
+        var before = _recorded;
+        _bound.Say();
+        if (_recorded != before + 1 || _last is not AgentAssistTranscriptEvent { ConversationId: ConversationId, TenantId: Tenant } t
+            || t.AgentId != AgentGuid)
+            throw new InvalidOperationException("The bench session's first emission was not published with its tenant, agent and conversation.");
 
         var published = _recorded;
         BridgeEmission();
