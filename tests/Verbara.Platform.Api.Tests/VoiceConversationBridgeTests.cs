@@ -866,6 +866,79 @@ public sealed class VoiceConversationBridgeTests : IDisposable
             Arg.Any<CancellationToken>());
     }
 
+    // ─── Snoop channels (agent-assist-works-end-to-end task B.5, design D8) ───
+    // Agent Assist taps each call it serves with snoop channels. Asterisk names one Snoop/<target uniqueid>-<n>, gives it
+    // a linkedid of its own and none of the target's channel variables, so a session the Sdk opens for it carries no
+    // TENANT_ID. These tests pin that the bridge turns such a session into nothing, with the same sequence on an ordinary
+    // trunk leg as the positive control.
+
+    private static void AddLeg(CallSession session, string channel, string technology)
+    {
+        var participant = new SessionParticipant
+        {
+            UniqueId = channel,
+            Channel = channel,
+            Technology = technology,
+            Role = ParticipantRole.Caller,
+        };
+        var add = typeof(CallSession).GetMethod("AddParticipant", BindingFlags.Instance | BindingFlags.NonPublic)
+                  ?? throw new InvalidOperationException("CallSession.AddParticipant not found.");
+        add.Invoke(session, [participant]);
+    }
+
+    private async Task DriveWholeCallAsync(VoiceConversationBridge bridge, string sessionId)
+    {
+        await bridge.HandleEventAsync(new CallStartedEvent(sessionId, "primary", _clock.UtcNow, CallDirection.Inbound, null));
+        await bridge.HandleEventAsync(new CallQueuedEvent(sessionId, "primary", _clock.UtcNow, "acme-Support", 1));
+        await bridge.HandleEventAsync(new CallConnectedEvent(sessionId, "primary", _clock.UtcNow, AgentInterface, "acme-Support", TimeSpan.FromSeconds(2)));
+        await bridge.HandleEventAsync(new CallEndedEvent(sessionId, "primary", _clock.UtcNow, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(28)));
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_ShouldCreateNoConversation_WhenTheSessionIsASnoopChannel()
+    {
+        AddPrimaryServer();
+        StubGetVar("Error", null); // a snoop carries none of its target's channel variables
+        var session = MakeSession("1794794993.11", tenant: null, agentInterface: AgentInterface);
+        AddLeg(session, "Snoop/1794794992.7-00000001", "Snoop");
+        _sessions.GetById(session.SessionId).Returns(session);
+        _sessions.ActiveSessions.Returns([session]);
+        StubContact();
+        var events = CaptureEvents();
+        var bridge = CreateBridge();
+
+        await DriveWholeCallAsync(bridge, session.SessionId);
+        await bridge.ObserveLeadershipAsync(); // the lease-acquisition stamp pass also leaves it tenant-less
+
+        await _conversations.DidNotReceive().SaveAsync(Arg.Any<Conversation>(), Arg.Any<CancellationToken>());
+        await _contacts.DidNotReceive().ResolveAsync(Arg.Any<TenantId>(), Arg.Any<ChannelAddress>(), Arg.Any<CancellationToken>());
+        await _capacity.DidNotReceive().ReserveAsync(Arg.Any<TenantId>(), Arg.Any<EntityId>(), Arg.Any<ChannelType>(), Arg.Any<CancellationToken>());
+        await _capacity.DidNotReceive().ReleaseAsync(Arg.Any<TenantId>(), Arg.Any<EntityId>(), Arg.Any<ChannelType>(), Arg.Any<CancellationToken>());
+        await _agents.DidNotReceive().SaveAsync(Arg.Any<Agent>(), Arg.Any<CancellationToken>());
+        events.Should().BeEmpty("a snoop session changes no conversation, agent presence or voice load");
+        session.TenantId.Should().BeNullOrEmpty();
+    }
+
+    /// <summary>Positive control: the same sequence on a trunk leg that carries TENANT_ID creates the Conversation.</summary>
+    [Fact]
+    public async Task HandleEventAsync_ShouldCreateTheConversation_WhenTheSameSequenceRunsOnATrunkLeg()
+    {
+        AddPrimaryServer();
+        StubGetVar("Error", null);
+        StubGetVarFor("TENANT_ID", Tenant);
+        var session = MakeSession("1794794992.7", tenant: null, agentInterface: AgentInterface);
+        AddLeg(session, "PJSIP/trunk-00000001", "PJSIP");
+        _sessions.GetById(session.SessionId).Returns(session);
+        StubContact();
+        var bridge = CreateBridge();
+
+        await DriveWholeCallAsync(bridge, session.SessionId);
+
+        await _conversations.Received(1).SaveAsync(
+            Arg.Is<Conversation>(c => c != null && c.VoiceLinkedId == "1794794992.7" && c.TenantId.Value == Tenant),
+            Arg.Any<CancellationToken>());
+    }
+
     // ─── OnCallStarted outbound linkage (3B.2d.3 — lab-verified against the real SDK model) ───
 
     private void StubGetVarFor(string variable, string? value)

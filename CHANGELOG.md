@@ -245,6 +245,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Replaces #571.
 - **The Mail service no longer references `Azure.Identity`**, which no Mail code used (it authenticates against Azure AD
   with its own token request), and its central `1.21.0` pin goes with it, since no other project referenced it.
+- **A snoop channel no longer opens a call session** (Verbara.Sdk `2.10.1`, above). The Sdk session manager opens no
+  call for a snoop channel (`Snoop/…`), the tap Agent Assist puts on each call it serves: such a channel used to count
+  as a call of its own in the session metrics, the active-session counts and the call events that Pro's push, event
+  store and cluster consumers read. Conversations, agent presence and voice load were never affected
+  (`SnoopChannelSessionTests`, and the snoop cases of `VoiceConversationBridgeTests`).
 
 ### Upgrading
 
