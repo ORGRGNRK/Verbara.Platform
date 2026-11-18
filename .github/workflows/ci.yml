@@ -507,8 +507,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      - name: Install diff-cover (pinned)
-        run: pip install --disable-pip-version-check diff_cover==10.3.0
+      # PyYAML for the Agent Assist Kubernetes guard's tests (scripts/tests/test_check_agentassist_k8s.py).
+      - name: Install diff-cover and PyYAML (pinned)
+        run: pip install --disable-pip-version-check diff_cover==10.3.0 pyyaml==6.0.2
       - name: Run coverage-script unit tests
         run: python3 -m unittest discover scripts/tests
       # SMB reference stack pin guard (OpenSpec bump-smb-reference-stack-pins, design Decision 3): every
@@ -633,8 +634,9 @@ jobs:
   #      logged catches in this same change, so the floor is zero.
   #   #9 Program.cs (the Api composition root) may not grow past its frozen LOC
   #      budget — extract endpoint groups instead of growing the god-file.
-  # Cheap (~seconds, pure Python stdlib, no .NET). Guard logic is unit-tested in
-  # the coverage-scripts job (scripts/tests/test_check_endpoint_invariants.py).
+  # Cheap (~seconds, Python, no .NET). Guard logic is unit-tested in the
+  # coverage-scripts job (scripts/tests/test_check_*.py). The two Agent Assist
+  # deployment guards use the runner's Docker Compose v2 and Helm, and PyYAML.
   # This IS a required (merge-blocking) check: the main-protection ruleset requires the
   # "Invariant Gates" context (promoted 2026-07-20; verbara-meta/ADR-0012 G-013).
   invariant-gates:
@@ -651,3 +653,10 @@ jobs:
       # profile). Reads the rendered merge (`docker compose config`), so an edit to either file is seen.
       - name: Scale overlay backplane
         run: python3 scripts/check-scale-backplane.py
+      - name: Install PyYAML (pinned)
+        run: pip install --disable-pip-version-check pyyaml==6.0.2
+      # Agent Assist audio on Kubernetes: the chart declares and advertises the audio port, every container port
+      # name is a valid (<= 15 character) name, the r55-platform NetworkPolicy admits the port from r55-asterisk,
+      # and platform-api and realtime render the same ConnectionStrings__Redis (`helm template`).
+      - name: Agent Assist Kubernetes audio path
+        run: python3 scripts/check-agentassist-k8s.py

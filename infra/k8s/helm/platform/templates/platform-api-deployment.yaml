@@ -91,7 +91,24 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.api.port }}
+            # Agent Assist snoop audio (design: one replica's own address per snoop, no Service). A port
+            # name is at most 15 characters.
+            - name: aa-audio
+              containerPort: {{ .Values.api.agentAssist.audioSocketPort }}
+              protocol: TCP
+              {{- if .Values.api.agentAssist.hostPort }}
+              hostPort: {{ .Values.api.agentAssist.hostPort }}
+              {{- end }}
           env:
+            # This pod's address, for the Agent Assist advertised host below ($(POD_IP) needs it defined first).
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: AgentAssist__AudioSocket__AdvertisedHost
+              value: {{ .Values.api.agentAssist.advertisedHost | quote }}
+            - name: AgentAssist__AudioSocket__Port
+              value: {{ .Values.api.agentAssist.audioSocketPort | quote }}
             {{- if .Values.api.aspnetcoreEnvironment }}
             - name: ASPNETCORE_ENVIRONMENT
               value: {{ .Values.api.aspnetcoreEnvironment | quote }}

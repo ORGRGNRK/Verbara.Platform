@@ -352,6 +352,32 @@ spec:
         - protocol: TCP
           port: 5000
 ---
+# 13b. Allow Agent Assist snoop audio into Platform API on port 9093
+#    Asterisk (r55-asterisk) connects to the pod address the acting Api
+#    replica advertised on each snoop (no Service in front), on the chart's
+#    api.agentAssist.audioSocketPort (containerPort aa-audio). The
+#    default-deny above drops it otherwise. Kept in step with the chart by
+#    scripts/check-agentassist-k8s.py.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agentassist-audio
+  namespace: r55-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: platform-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: r55-asterisk
+      ports:
+        - protocol: TCP
+          port: 9093
+---
 # 14. Allow ingress to Web frontend on port 80
 #    Same rationale as API — ingress controller or LB from any source.
 apiVersion: networking.k8s.io/v1
