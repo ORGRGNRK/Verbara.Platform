@@ -66,6 +66,44 @@ internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
+    // The four events' factories (design D15): static, so an emission allocates the record alone, built once with the
+    // bound identity and its emission time, with no per-emission closure and no copy.
+    private static readonly AgentAssistSessionIdentity.EventFactory BuildSuggestion =
+        static (payload, sessionId, tenantId, agentId, conversationId, emittedAt) =>
+        {
+            var s = (AgentSuggestion)payload;
+            return new AgentAssistSuggestionEvent(
+                tenantId, sessionId, agentId, conversationId,
+                s.Id, s.Text, s.Priority.ToString(), s.Source.ToString(), s.TriggerPhrase) { Timestamp = emittedAt };
+        };
+
+    private static readonly AgentAssistSessionIdentity.EventFactory BuildSentiment =
+        static (payload, sessionId, tenantId, agentId, conversationId, emittedAt) =>
+        {
+            var r = (SentimentReading)payload;
+            return new AgentAssistSentimentEvent(
+                tenantId, sessionId, agentId, conversationId,
+                r.Speaker.ToString(), r.Score, r.Label.ToString(), r.TriggerWords) { Timestamp = emittedAt };
+        };
+
+    private static readonly AgentAssistSessionIdentity.EventFactory BuildComplianceAlert =
+        static (payload, sessionId, tenantId, agentId, conversationId, emittedAt) =>
+        {
+            var a = (ComplianceAlert)payload;
+            return new AgentAssistComplianceAlertEvent(
+                tenantId, sessionId, agentId, conversationId,
+                a.RuleId, a.Phrase, a.Severity.ToString()) { Timestamp = emittedAt };
+        };
+
+    private static readonly AgentAssistSessionIdentity.EventFactory BuildTranscript =
+        static (payload, sessionId, tenantId, agentId, conversationId, emittedAt) =>
+        {
+            var t = (TranscriptSegment)payload;
+            return new AgentAssistTranscriptEvent(
+                tenantId, sessionId, agentId, conversationId,
+                t.Speaker.ToString(), t.Text, IsFinal: true) { Timestamp = emittedAt };
+        };
+
     /// <summary>
     /// Starts bridging one announced session. Runs synchronously and awaits nothing: the session's streams do not
     /// replay, so every subscription is in place before this returns and the session can emit (design D14, "The bridge
@@ -92,41 +130,25 @@ internal sealed partial class AgentAssistBridge : IHostedService, IDisposable
             var suggestionSub = session.Suggestions.Subscribe(s =>
             {
                 filing?.OnEmission();
-                identity.Emit(
-                    (tenantId, agentId, conversationId) => new AgentAssistSuggestionEvent(
-                        tenantId, sessionId, agentId, conversationId,
-                        s.Id, s.Text, s.Priority.ToString(), s.Source.ToString(), s.TriggerPhrase),
-                    Log.PublishSuggestionFailed);
+                identity.Emit(BuildSuggestion, s, Log.PublishSuggestionFailed);
             });
 
             var sentimentSub = session.Sentiment.Subscribe(r =>
             {
                 filing?.OnEmission();
-                identity.Emit(
-                    (tenantId, agentId, conversationId) => new AgentAssistSentimentEvent(
-                        tenantId, sessionId, agentId, conversationId,
-                        r.Speaker.ToString(), r.Score, r.Label.ToString(), r.TriggerWords),
-                    Log.PublishSentimentFailed);
+                identity.Emit(BuildSentiment, r, Log.PublishSentimentFailed);
             });
 
             var complianceSub = session.ComplianceAlerts.Subscribe(a =>
             {
                 filing?.OnEmission();
-                identity.Emit(
-                    (tenantId, agentId, conversationId) => new AgentAssistComplianceAlertEvent(
-                        tenantId, sessionId, agentId, conversationId,
-                        a.RuleId, a.Phrase, a.Severity.ToString()),
-                    Log.PublishComplianceAlertFailed);
+                identity.Emit(BuildComplianceAlert, a, Log.PublishComplianceAlertFailed);
             });
 
             var transcriptSub = session.Transcripts.Subscribe(t =>
             {
                 filing?.OnEmission();
-                identity.Emit(
-                    (tenantId, agentId, conversationId) => new AgentAssistTranscriptEvent(
-                        tenantId, sessionId, agentId, conversationId,
-                        t.Speaker.ToString(), t.Text, IsFinal: true),
-                    Log.PublishTranscriptFailed);
+                identity.Emit(BuildTranscript, t, Log.PublishTranscriptFailed);
             });
 
             _sessions[sessionId] = new Attached(

@@ -37,8 +37,13 @@ internal sealed partial class AgentAssistSessionIdentity : IDisposable
     /// <summary>The shortest time between two conversation lookups.</summary>
     public static readonly TimeSpan LookupInterval = TimeSpan.FromSeconds(1);
 
-    /// <summary>Builds one event from the bound tenant, agent and conversation.</summary>
-    internal delegate PlatformEvent EventFactory(string tenantId, string agentId, string conversationId);
+    /// <summary>
+    /// Builds one event of the session from its <paramref name="payload"/> (the engine's segment, suggestion, reading or
+    /// alert), the bound tenant, agent and conversation, stamped with <paramref name="emittedAt"/>. A static method or
+    /// lambda: the bound path then allocates the record alone, with no closure and no copy (design D15).
+    /// </summary>
+    internal delegate PlatformEvent EventFactory(
+        object payload, string sessionId, string tenantId, string agentId, string conversationId, DateTimeOffset emittedAt);
 
     private readonly string _sessionId;
     private readonly string? _startTenant;
@@ -84,10 +89,11 @@ internal sealed partial class AgentAssistSessionIdentity : IDisposable
     public void Refresh() => StartLookupIfDue();
 
     /// <summary>
-    /// One event of the session, emitted now: published with the bound identity, or held until it is bound.
-    /// <paramref name="onError"/> logs a failed publish (the event is not retried).
+    /// One event of the session, emitted now: <paramref name="build"/> over <paramref name="payload"/>, published with the
+    /// bound identity, or held until it is bound. <paramref name="onError"/> logs a failed publish (the event is not
+    /// retried).
     /// </summary>
-    public void Emit(EventFactory build, Action<ILogger, string, Exception> onError)
+    public void Emit(EventFactory build, object payload, Action<ILogger, string, Exception> onError)
     {
         StartLookupIfDue();
         lock (_gate)
@@ -96,7 +102,7 @@ internal sealed partial class AgentAssistSessionIdentity : IDisposable
                 return;
 
             var now = _time.GetUtcNow();
-            var item = new Pending(build, now, onError);
+            var item = new Pending(build, payload, now, onError);
             ReevaluateLocked(now);
             if (_inConflict)
             {
@@ -326,7 +332,7 @@ internal sealed partial class AgentAssistSessionIdentity : IDisposable
     {
         try
         {
-            var evt = item.Build(_owner!, _agentId, _conversationId ?? string.Empty) with { Timestamp = item.EmittedAt };
+            var evt = item.Build(item.Payload, _sessionId, _owner!, _agentId, _conversationId ?? string.Empty, item.EmittedAt);
             _bus.Publish(evt);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -335,7 +341,8 @@ internal sealed partial class AgentAssistSessionIdentity : IDisposable
         }
     }
 
-    private readonly record struct Pending(EventFactory Build, DateTimeOffset EmittedAt, Action<ILogger, string, Exception> OnError);
+    private readonly record struct Pending(
+        EventFactory Build, object Payload, DateTimeOffset EmittedAt, Action<ILogger, string, Exception> OnError);
 
     private static partial class Log
     {
