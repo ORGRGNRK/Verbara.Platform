@@ -3,6 +3,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Reactive.Disposables;
 using System.Text;
 using DotNet.Testcontainers.Builders;
@@ -434,6 +436,17 @@ internal sealed class AdmissionHostFactory(string connectionString) : WebApplica
         builder.UseSetting("Asterisk:Ami:Port", "5038");
         builder.UseSetting("Asterisk:Ami:Username", "admission");
         builder.UseSetting("Asterisk:Ami:Password", "admission");
+        // The Agent Assist engine binds its AudioSocket listener before it subscribes to session events, and a bind that
+        // fails ends the engine without a subscription. The engine's default port (9093) is one machine-wide port that
+        // other Api hosts of this assembly bind too, so the rig takes a port nobody holds.
+        builder.UseSetting("AgentAssist:AudioSocket:Port", FreePort().ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static int FreePort()
+    {
+        using var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        return ((IPEndPoint)probe.LocalEndpoint).Port;
     }
 
     protected override IHost CreateHost(IHostBuilder builder)
