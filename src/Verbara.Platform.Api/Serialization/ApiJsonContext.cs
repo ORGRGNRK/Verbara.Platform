@@ -200,7 +200,11 @@ namespace Verbara.Platform.Api.Serialization;
 [JsonSerializable(typeof(CreateContactListRequest))]
 [JsonSerializable(typeof(ImportContactsRequest))]
 [JsonSerializable(typeof(ImportResultDto))]
-[JsonSerializable(typeof(PagedResult<Contact>))]
+// GET .../contact-lists/{listId}/contacts answers a page of the dialer's contacts; its typed Ok<PagedResult<...>> has
+// no metadata at run time without these lines (AOT).
+[JsonSerializable(typeof(PagedResult<CampaignContactDto>))]
+[JsonSerializable(typeof(CampaignContactDto))]
+[JsonSerializable(typeof(CampaignContactPhoneDto))]
 [JsonSerializable(typeof(DispositionCodeDto))]
 [JsonSerializable(typeof(List<DispositionCodeDto>))]
 [JsonSerializable(typeof(CreateDispositionCodeRequest))]

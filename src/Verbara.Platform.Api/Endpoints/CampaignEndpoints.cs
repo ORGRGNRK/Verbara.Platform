@@ -283,25 +283,33 @@ internal static class CampaignEndpoints
 
     // ─── Contact List Handlers ────────────────────────────────────────────────
 
-    private static async Task<Ok<List<ContactListDto>>> ListContactLists(
+    private static async Task<Results<Ok<List<ContactListDto>>, NotFound>> ListContactLists(
         long id,
         HttpContext context,
+        [FromServices] CampaignStoreBase campaignStore,
         [FromServices] ContactListStoreBase contactListStore,
         CancellationToken ct)
     {
         var tenantId = GetTenantId(context);
+        // A campaign of another tenant is no campaign of the caller's: 404, as GetCampaign answers.
+        if (await campaignStore.GetCampaignAsync(tenantId, id, ct) is null)
+            return TypedResults.NotFound();
         var lists = await contactListStore.ListContactListsAsync(tenantId, id, ct);
         return TypedResults.Ok(lists.Select(MapToContactListDto).ToList());
     }
 
-    private static async Task<IResult> CreateContactList(
+    private static async Task<Results<Created<ContactListDto>, NotFound>> CreateContactList(
         long id,
         HttpContext context,
         [FromBody] CreateContactListRequest body,
+        CampaignStoreBase campaignStore,
         ContactListStoreBase contactListStore,
         CancellationToken ct)
     {
         var tenantId = GetTenantId(context);
+        // A list is created only on a campaign of the caller's tenant; any other campaign id is a 404.
+        if (await campaignStore.GetCampaignAsync(tenantId, id, ct) is null)
+            return TypedResults.NotFound();
         var list = new ContactList
         {
             TenantId = tenantId,
@@ -309,11 +317,17 @@ internal static class CampaignEndpoints
             Name = body.Name,
             CreatedAt = DateTimeOffset.UtcNow,
         };
-        var created = await contactListStore.CreateContactListAsync(tenantId, id, list, ct);
-        return Results.Created($"/admin/campaigns/{id}/contact-lists/{created.Id}", MapToContactListDto(created));
+        // Defense in depth: the store also creates the list only on a campaign of the caller's tenant, in the same
+        // statement, so a campaign that stops being the caller's after the check above is still a 404 (null).
+        var created = await contactListStore.TryCreateContactListAsync(tenantId, id, list, ct);
+        if (created is null)
+            return TypedResults.NotFound();
+        return TypedResults.Created($"/admin/campaigns/{id}/contact-lists/{created.Id}", MapToContactListDto(created));
     }
 
-    private static async Task<IResult> DeleteContactList(
+    // The three list routes address a list through its campaign: the store acts only on a list of that campaign whose
+    // campaign is the caller tenant's, and answers "no such list" (false / null) otherwise, which is a 404.
+    private static async Task<Results<NoContent, NotFound>> DeleteContactList(
         long id,
         long listId,
         HttpContext context,
@@ -321,11 +335,11 @@ internal static class CampaignEndpoints
         CancellationToken ct)
     {
         var tenantId = GetTenantId(context);
-        await contactListStore.DeleteContactListAsync(tenantId, listId, ct);
-        return Results.NoContent();
+        var deleted = await contactListStore.DeleteContactListAsync(tenantId, id, listId, ct);
+        return deleted ? TypedResults.NoContent() : TypedResults.NotFound();
     }
 
-    private static async Task<Ok<ImportResultDto>> ImportContacts(
+    private static async Task<Results<Ok<ImportResultDto>, NotFound>> ImportContacts(
         long id,
         long listId,
         HttpContext context,
@@ -336,11 +350,13 @@ internal static class CampaignEndpoints
         var tenantId = GetTenantId(context);
         var rows = body.Contacts.Select(c => new ContactImportRow(
             c.FirstName, c.LastName, c.Phone, c.PhoneType, c.Metadata)).ToList();
-        var imported = await contactListStore.ImportContactsAsync(tenantId, listId, rows, ct);
-        return TypedResults.Ok(new ImportResultDto(imported, 0, 0));
+        var imported = await contactListStore.ImportContactsAsync(tenantId, id, listId, rows, ct);
+        if (imported is not { } count)
+            return TypedResults.NotFound();
+        return TypedResults.Ok(new ImportResultDto(count, 0, 0));
     }
 
-    private static async Task<IResult> ListContacts(
+    private static async Task<Results<Ok<PagedResult<CampaignContactDto>>, NotFound>> ListContacts(
         long id,
         long listId,
         HttpContext context,
@@ -350,9 +366,20 @@ internal static class CampaignEndpoints
         CancellationToken ct = default)
     {
         var tenantId = GetTenantId(context);
-        var (items, total) = await contactListStore.ListContactsAsync(tenantId, listId, page, pageSize, ct);
-        return Results.Ok(new PagedResult<Contact>(items, total, page, pageSize));
+        var contacts = await contactListStore.ListContactsAsync(tenantId, id, listId, page, pageSize, ct);
+        if (contacts is not { } found)
+            return TypedResults.NotFound();
+        return TypedResults.Ok(new PagedResult<CampaignContactDto>(
+            found.Items.Select(MapToCampaignContactDto).ToList(), found.TotalCount, page, pageSize));
     }
+
+    private static CampaignContactDto MapToCampaignContactDto(Contact c) => new(
+        c.Id, c.ContactListId, c.ExternalId, c.FirstName, c.LastName, c.Status, c.Successful, c.RetryEnabled,
+        c.Attempts, c.LastAttemptAt, c.LastPhoneDialed, c.LastPhoneIndex, c.LastCallUniqueId, c.LastCallAttemptId,
+        c.LastDispositionId, c.LastComment, c.Priority, c.IsScheduledCallback, c.ScheduledCallbackAt,
+        c.EarliestNextAttemptAt, c.AssignedAgentId, c.Timezone, c.CreatedAt, c.ExpiresAt, c.Metadata,
+        c.PhoneNumbers.Select(p => new CampaignContactPhoneDto(
+            p.Id, p.ContactId, p.PhoneNumber, p.Type, p.Priority, p.Attempts, p.LastAttemptAt, p.Status)).ToList());
 
     // ─── Disposition Handlers ─────────────────────────────────────────────────
 
@@ -367,14 +394,18 @@ internal static class CampaignEndpoints
         return TypedResults.Ok(codes.Select(MapToDispositionDto).ToList());
     }
 
-    private static async Task<IResult> CreateDisposition(
+    private static async Task<Results<Created<DispositionCodeDto>, NotFound>> CreateDisposition(
         long id,
         HttpContext context,
         [FromBody] CreateDispositionCodeRequest body,
+        CampaignStoreBase campaignStore,
         DispositionCodeStoreBase dispositionStore,
         CancellationToken ct)
     {
         var tenantId = GetTenantId(context);
+        // A disposition code is created only on a campaign of the caller's tenant; any other campaign id is a 404.
+        if (await campaignStore.GetCampaignAsync(tenantId, id, ct) is null)
+            return TypedResults.NotFound();
         var code = new DispositionCode
         {
             TenantId = tenantId,
@@ -390,7 +421,7 @@ internal static class CampaignEndpoints
             IsActive = true,
         };
         var created = await dispositionStore.CreateAsync(tenantId, code, ct);
-        return Results.Created($"/admin/campaigns/{id}/dispositions/{created.Id}", MapToDispositionDto(created));
+        return TypedResults.Created($"/admin/campaigns/{id}/dispositions/{created.Id}", MapToDispositionDto(created));
     }
 
     private static async Task<Results<Ok<DispositionCodeDto>, NotFound>> UpdateDisposition(
@@ -420,16 +451,26 @@ internal static class CampaignEndpoints
         return TypedResults.Ok(MapToDispositionDto(existing));
     }
 
-    private static async Task<IResult> DeleteDisposition(
+    private static async Task<Results<NoContent, NotFound>> DeleteDisposition(
         long id,
         long codeId,
         HttpContext context,
+        [FromServices] CampaignStoreBase campaignStore,
         [FromServices] DispositionCodeStoreBase dispositionStore,
         CancellationToken ct)
     {
         var tenantId = GetTenantId(context);
+        // The campaign must be the caller tenant's, and the code one of that campaign's codes; otherwise 404 and
+        // nothing is removed. The code lookup alone filters only the code's own tenant and campaign id, so the
+        // campaign check comes first.
+        if (await campaignStore.GetCampaignAsync(tenantId, id, ct) is null)
+            return TypedResults.NotFound();
+        var existing = (await dispositionStore.ListByCampaignAsync(tenantId, id, ct))
+            .FirstOrDefault(d => d.Id == codeId);
+        if (existing is null)
+            return TypedResults.NotFound();
         await dispositionStore.DeleteAsync(tenantId, codeId, ct);
-        return Results.NoContent();
+        return TypedResults.NoContent();
     }
 
     // ─── Callback Handlers ────────────────────────────────────────────────────
@@ -692,6 +733,19 @@ internal sealed record ContactListDto(long Id, string Name, int TotalContacts, i
 internal sealed record ImportContactsRequest(ContactImportRowDto[] Contacts);
 internal sealed record ContactImportRowDto(string FirstName, string? LastName, string Phone, string? PhoneType, Dictionary<string, string>? Metadata);
 internal sealed record ImportResultDto(int Imported, int Skipped, int Duplicates);
+
+// A contact of a campaign's list, as the dialer keeps it. Its own type so the OpenAPI document does not describe it
+// with the CRM contact of /contacts, which shares the dialer model's class name.
+internal sealed record CampaignContactDto(
+    long Id, long ContactListId, string? ExternalId, string? FirstName, string? LastName, ContactStatus Status,
+    bool Successful, bool RetryEnabled, int Attempts, DateTimeOffset? LastAttemptAt, string? LastPhoneDialed,
+    int LastPhoneIndex, string? LastCallUniqueId, long? LastCallAttemptId, long? LastDispositionId, string? LastComment,
+    int Priority, bool IsScheduledCallback, DateTimeOffset? ScheduledCallbackAt, DateTimeOffset? EarliestNextAttemptAt,
+    string? AssignedAgentId, string? Timezone, DateTimeOffset CreatedAt, DateTimeOffset? ExpiresAt,
+    Dictionary<string, string>? Metadata, IReadOnlyList<CampaignContactPhoneDto> PhoneNumbers);
+internal sealed record CampaignContactPhoneDto(
+    long Id, long ContactId, string PhoneNumber, PhoneType Type, int Priority, int Attempts,
+    DateTimeOffset? LastAttemptAt, ContactPhoneStatus Status);
 
 // ─── Disposition DTOs ──────────────────────────────────────────────────────────
 
