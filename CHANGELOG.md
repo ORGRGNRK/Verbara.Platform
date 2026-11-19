@@ -11,6 +11,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The nightly Pro retention purge can delete.** The configuration key `Retention:DryRun` (environment variable
+  `Retention__DryRun`) sets its mode on startup: `true`, the default when the key is absent or empty, counts the rows
+  past each table's window and deletes none, as every release did until now; `false` deletes them. A value that is not
+  a boolean stops the Api at startup with an error naming the key. The Api logs the mode once at startup, and
+  `GET /api/v1/management/retention/config` reports in `dryRun` the mode of the replica that answers. The key does not
+  govern the per-tenant conversation retention. Read
+  [Turning on the Pro retention purge](docs/operations/upgrade-retention-dry-run.md) before setting `false`.
 - `GET /api/v1/analytics/qa-availability` says whether post-call QA results can exist for the caller's tenant, so a
   client can hide QA screens that would stay empty. The body always carries `available`, `analysisRunning`, `reason`,
   `transcriptSource`, `speakerMode`, `topicsConfigured`, `complianceConfigured`, `sentimentSupported` and `backlog`,
@@ -72,6 +79,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **An answered queue call's record names the agent who took it** (#620). Verbara.Sdk.Pro `2.30.0-pro` asks the host
+  to name the agent of a call taken by a queue member, and the Api now does: the member interface
+  `PJSIP/{tenant}-agent-{agentId}` names that agent, so the CDR list and detail show it and
+  `GET /api/v1/analytics/cdr?agent=` finds the call. An interface of another tenant, a supervisor's listen slot or any
+  other member keeps the agent the Sdk recorded. A call taken in two queue visits names its first agent. The Api no
+  longer logs Pro's warning that no `ICallAgentResolver` is registered. Records written before this release are not
+  repaired (read **Upgrading**).
 - **The `services` readiness entry stays Degraded while a dependency circuit is half-open.** From Verbara.Sdk `2.10`
   a tripped circuit reads half-open once its open window ends, with or without a call, so the entry read Healthy
   while the dependency was still down. A watched circuit that is not closed now keeps `services` Degraded until a call
@@ -104,6 +118,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   provider and encrypted credentials set through `PUT /api/v1/admin/features/agent-assist` are stored in
   `agent_assist_feature_state` and shared by every replica, so they survive a restart; the `AgentAssist` configuration
   section seeds that row until an administrator writes it. Without a database the toggle stays in memory, as before.
+
+### Removed
+
+- **BREAKING for scripts: `PATCH /api/v1/management/retention/config`, the runtime DryRun toggle.** It flipped a
+  per-process flag that `GET .../config` reported; it never changed the nightly purge, which always ran dry. Changing
+  the mode is now a configuration change plus a restart (`Retention:DryRun`, above). A script that calls the PATCH gets
+  `405 Method Not Allowed`, and so does the console's DryRun checkbox until the console release that removes it; ship
+  that console release with this one or first. `POST /api/v1/management/retention/run-now` is unchanged: it runs dry
+  unless called with `dryRun=false`, whatever the configured mode.
 
 ### Fixed
 
@@ -158,6 +181,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/operations/agentassist-setup.md`.
 - New counters on `/metrics`: `platform_agentassist_call_claim_total{outcome}`,
   `platform_agentassist_toggle_stale_total{path}` and `platform_agentassist_recognizer_unavailable_total{reason}`.
+- `PUT /api/v1/admin/campaigns/{id}/dispositions/{codeId}` checks that the campaign belongs to the caller before it
+  updates the disposition code, as creating and deleting a code already do. A campaign of another tenant answers 404
+  and nothing is written.
 - `GET /api/v1/analytics/cdr/{sessionId}` always answers `hasTranscript` false. It used to answer true for any call
   with an analysis summary, although no transcript route is served, so a client that followed it got 404.
 - The analytics endpoints read a date-only `to` (`2026-11-10`) as the whole of that UTC day. Before, it was that day's
@@ -300,9 +326,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The event store's first boot on `2.30.x` runs an additive migration (`V005`, a nullable
     `completed_sessions.agent_interface` column); nothing is rewritten.
   - The Platform hub's seven client methods no longer take a `CancellationToken`. Platform has no C# caller of them.
-  - Platform registers no call-agent resolver yet, so the first call answered by a queue member interface that the
-    event store projects logs one Warning per projector and subscriber instance, and its record keeps no agent id
-    (#620 tracks registering one). (#621)
+  - The event store asks the host for a call-agent resolver; this release registers Platform's (#620), so no Warning
+    is logged and an answered queue call's record names its agent. (#621)
 - **Verbara.Sdk.Pro `2.30.1-pro` → `2.30.2-pro`**, the 22 `Verbara.Sdk.Pro.*` pins in one commit, so an Agent Assist
   snoop that enters its Stasis app after its create returned is no longer hung up. Before, the engine's first
   set-variable on such a snoop answered 409 "Channel not in Stasis application" and the call went unassisted; now the
@@ -346,6 +371,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Match the node Stasis app by prefix.** A tool or alert that looked for `verbara-node` (or another
   `Asterisk:Ari:NodeApplication`) by its exact name must match `verbara-node*`: each replica now registers it with its
   machine name appended.
+- **Answered queue calls recorded before this release keep no agent** (#620). Records written while Platform
+  registered no call-agent resolver, since the Verbara.Sdk.Pro `2.30.1-pro` pin (#621) or before, are not repaired,
+  so `GET /api/v1/analytics/cdr?agent=` omits them. To count them, run on the event-store database
+  (`ConnectionStrings:Analytics`, else the dialer's database; not necessarily the core one):
+
+  ```sql
+  SELECT count(*) FROM completed_sessions
+  WHERE queue_name IS NOT NULL AND connected_at IS NOT NULL
+    AND agent_id IS NULL AND linked_id IS NOT NULL;
+  ```
+
+  It counts the records written since Verbara.Sdk.Pro `2.26.0-pro` (older records have no `linked_id`). The query
+  has no time bound, so after the upgrade it also counts new answered queue calls whose member is not a Platform
+  agent (another tenant's interface, a supervisor's listen slot, a `Local/` member) when the Sdk recorded no agent
+  for them; add `AND completed_at < '<upgrade time>'` to count only the older records.
+- **Turning on the Pro retention purge: dry run first, backup, then `Retention__DryRun=false` on every replica.**
+  Nothing changes on upgrade (absent key = dry). The first run with `false` deletes, in batches, every row already
+  past its table's window, not one day's worth: from 30 days (failed and not-analysed analysis queue entries) to
+  365 days (analytics snapshots, call analysis results), 180 days for Agent Assist sessions and completed sessions.
+  Live queue snapshots (24 hours) are not purged by this host in either mode. Preview the counts with
+  `POST /api/v1/management/retention/run-now` (no `dryRun`) and read `targets[].rowsPurged`, take a backup, then set
+  the key on every replica and restart; confirm the startup log line and `dryRun: false` on each. Remove any script
+  that calls `PATCH /api/v1/management/retention/config`. Steps:
+  [Turning on the Pro retention purge](docs/operations/upgrade-retention-dry-run.md).
 - **An Agent Assist session whose call carries no tenant is no longer listed.** A call that arrives on a trunk without
   the `TENANT_ID` channel variable has no tenant, so its Agent Assist session is missing from
   `GET /api/v1/supervisor/sessions/active` and answers 404 to whisper and transcript listen. Set `TENANT_ID` on every
