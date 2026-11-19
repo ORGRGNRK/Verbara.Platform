@@ -303,6 +303,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Platform registers no call-agent resolver yet, so the first call answered by a queue member interface that the
     event store projects logs one Warning per projector and subscriber instance, and its record keeps no agent id
     (#620 tracks registering one). (#621)
+- **Verbara.Sdk.Pro `2.30.1-pro` → `2.30.2-pro`**, the 22 `Verbara.Sdk.Pro.*` pins in one commit, so an Agent Assist
+  snoop that enters its Stasis app after its create returned is no longer hung up. Before, the engine's first
+  set-variable on such a snoop answered 409 "Channel not in Stasis application" and the call went unassisted; now the
+  engine sends it again with a short backoff until the snoop enters, up to `ConnectionTimeout`. Only
+  `Verbara.Sdk.Pro.AgentAssist` changes, and no public member changes. Diffed by package name over every
+  `project.assets.json`, the restore moved only the 22 Pro packages. What reaches Platform:
+  - The Sdk logs each absorbed 409 at Warning (`[ARI_HTTP] Error response`). It is not a fault when it comes with an
+    `agentassist.snoop.stasis_wait` sample.
+  - A snoop that never enters its app ends the pair, counted in `agentassist.snoop.errors` with
+    `error.type=SnoopNeverEnteredStasisException`.
 - **The ASP.NET Core packages move together to `10.0.15`**: `Microsoft.AspNetCore.Authentication.JwtBearer` and
   `.OpenIdConnect` (`10.0.14`), `Microsoft.AspNetCore.DataProtection` and `.Extensions`, `Microsoft.AspNetCore.SignalR.Client`
   and `.Common`, `Microsoft.AspNetCore.Mvc.Testing`, `System.Security.Cryptography.Xml` and `.Pkcs` (`10.0.13`), and
