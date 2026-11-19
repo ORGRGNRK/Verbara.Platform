@@ -9,10 +9,13 @@ The shipped files keep that path open when:
   - the audio port is the chart's `api.agentAssist.audioSocketPort` default (--values, default the chart's values.yaml),
     which must be set;
   - one `r55-platform` NetworkPolicy in --manifest (default infra/k8s/manifests/network-policies.yaml) selects
-    `app.kubernetes.io/name: platform-api` and admits TCP on that port (by number, or by the container port's name)
-    from a namespaceSelector on `kubernetes.io/metadata.name: r55-asterisk` (the default-deny drops it otherwise), and
-    no rule of a platform-api policy there that names the port admits it from anything else: every `from` peer selects
-    the r55-asterisk namespace (a podSelector beside it only narrows it), and a rule with no `from` admits every source;
+    the platform-api pod and admits TCP on that port (by number, by the container port's name, or by a `port`..`endPort`
+    range) from a namespaceSelector on `kubernetes.io/metadata.name: r55-asterisk` (the default-deny drops it
+    otherwise), and no rule there that admits the port to that pod admits it from anything else: every `from` peer
+    selects the r55-asterisk namespace (a podSelector beside it only narrows it), and a rule with no `from` admits every
+    source. A policy selects the pod when its podSelector matches the rendered pod template's labels (plus
+    `app.kubernetes.io/name: platform-api`), so `podSelector: {}` selects it; a rule with no `ports`, or a TCP entry
+    with no `port`, admits every port;
   - `helm template <chart>` (or --rendered FILE) renders a platform-api Deployment whose `api` container declares that
     containerPort, takes POD_IP from `status.podIP`, sets AgentAssist__AudioSocket__AdvertisedHost (non-blank) and
     AgentAssist__AudioSocket__Port equal to the port;
@@ -109,12 +112,43 @@ def _from_asterisk(peer):
 
 
 def _names_port(rule, port, port_names):
-    for p in rule.get("ports") or []:
+    """Whether the rule admits TCP `port`: a rule with no `ports` admits every port, and so does a TCP entry with no
+    `port`; an entry admits it by number, by the container port's name, or by a `port`..`endPort` range."""
+    ports = rule.get("ports")
+    if not ports:
+        return True
+    for p in ports:
         if not isinstance(p, dict) or (p.get("protocol") or "TCP") != "TCP":
             continue
-        if p.get("port") == port or (isinstance(p.get("port"), str) and p.get("port") in port_names):
+        start = p.get("port")
+        if start is None or start == port or (isinstance(start, str) and start in port_names):
+            return True
+        end = p.get("endPort")
+        if isinstance(start, int) and isinstance(end, int) and start <= port <= end:
             return True
     return False
+
+
+def _selects(selector, labels):
+    """Whether a NetworkPolicy podSelector matches a pod with `labels` (an empty selector selects every pod)."""
+    if not isinstance(selector, dict):
+        return True
+    for key, value in (selector.get("matchLabels") or {}).items():
+        if labels.get(key) != value:
+            return False
+    for expr in selector.get("matchExpressions") or []:
+        if not isinstance(expr, dict):
+            continue
+        key, op, values = expr.get("key"), expr.get("operator"), expr.get("values") or []
+        if op == "In" and labels.get(key) not in values:
+            return False
+        if op == "NotIn" and key in labels and labels[key] in values:
+            return False
+        if op == "Exists" and key not in labels:
+            return False
+        if op == "DoesNotExist" and key in labels:
+            return False
+    return True
 
 
 def _admits(rule, port, port_names):
@@ -132,15 +166,16 @@ def _wider_sources(rule, port, port_names):
     return [repr(src) for src in sources if not _from_asterisk(src)]
 
 
-def check_policy(docs, where, port, port_names):
+def check_policy(docs, where, port, port_names, pod_labels=None):
+    labels = dict(pod_labels or {})
+    labels[_API_LABEL[0]] = _API_LABEL[1]
     failures = []
     admitted = False
     for d in docs:
         if d.get("kind") != "NetworkPolicy" or (d.get("metadata") or {}).get("namespace") != _NAMESPACE:
             continue
         spec = d.get("spec") or {}
-        labels = ((spec.get("podSelector") or {}).get("matchLabels")) or {}
-        if labels.get(_API_LABEL[0]) != _API_LABEL[1]:
+        if not _selects(spec.get("podSelector"), labels):
             continue
         name = (d.get("metadata") or {}).get("name")
         for rule in spec.get("ingress") or []:
@@ -217,6 +252,12 @@ def check_rendered(docs, where, port):
     return failures
 
 
+def _pod_labels(docs):
+    api = _deployment(docs, "platform-api")
+    template = ((api or {}).get("spec") or {}).get("template") or {}
+    return dict((template.get("metadata") or {}).get("labels") or {})
+
+
 def _port_names(docs):
     api = _deployment(docs, "platform-api")
     if api is None:
@@ -237,7 +278,7 @@ def main(argv=None):
         rendered_where = args.rendered or f"helm template {os.path.relpath(args.chart, _ROOT)}"
         rendered = _docs(_read(args.rendered) if args.rendered else render(args.chart), rendered_where)
         policy = _docs(_read(args.manifest), args.manifest)
-        failures += check_policy(policy, args.manifest, port, _port_names(rendered))
+        failures += check_policy(policy, args.manifest, port, _port_names(rendered), _pod_labels(rendered))
         failures += check_rendered(rendered, rendered_where, port)
     except InputError as e:
         print(f"check-agentassist-k8s: {e}", file=sys.stderr)

@@ -181,6 +181,127 @@ class CheckAgentAssistK8sTests(unittest.TestCase):
             "            matchLabels:\n              app: asterisk\n"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_fails_when_another_rule_admits_every_port_from_every_namespace(self):
+        r = self._run(policy=_POLICY + "    - from:\n        - namespaceSelector: {}\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("from a source beyond namespace r55-asterisk: {'namespaceSelector': {}}", r.stdout)
+
+    def test_fails_when_a_tcp_entry_with_no_port_admits_every_namespace(self):
+        r = self._run(policy=_POLICY + "    - from:\n        - namespaceSelector: {}\n"
+                                       "      ports:\n        - protocol: TCP\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("from a source beyond namespace r55-asterisk: {'namespaceSelector': {}}", r.stdout)
+
+    def test_fails_when_a_port_range_covering_the_port_admits_every_namespace(self):
+        r = self._run(policy=_POLICY + "    - from:\n        - namespaceSelector: {}\n"
+                                       "      ports:\n        - protocol: TCP\n          port: 9000\n"
+                                       "          endPort: 9100\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("from a source beyond namespace r55-asterisk: {'namespaceSelector': {}}", r.stdout)
+
+    def test_passes_when_a_port_range_stops_short_of_the_port(self):
+        r = self._run(policy=_POLICY + "    - from:\n        - namespaceSelector: {}\n"
+                                       "      ports:\n        - protocol: TCP\n          port: 9000\n"
+                                       "          endPort: 9092\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_passes_when_the_asterisk_rule_admits_the_port_through_a_range(self):
+        r = self._run(policy=_POLICY.replace("port: 9093", "port: 9090\n          endPort: 9095"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_fails_when_a_policy_selecting_every_pod_admits_the_port_from_every_namespace(self):
+        r = self._run(policy=_POLICY + textwrap.dedent("""\
+            ---
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-everything-audio
+              namespace: r55-platform
+            spec:
+              podSelector: {}
+              ingress:
+                - from:
+                    - namespaceSelector: {}
+                  ports:
+                    - protocol: TCP
+                      port: 9093
+            """))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("NetworkPolicy allow-everything-audio admits TCP 9093", r.stdout)
+
+    def test_fails_when_a_match_expression_selecting_the_api_admits_the_port_from_every_namespace(self):
+        r = self._run(policy=_POLICY + textwrap.dedent("""\
+            ---
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-api-and-web-audio
+              namespace: r55-platform
+            spec:
+              podSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values: [platform-api, web]
+              ingress:
+                - from:
+                    - namespaceSelector: {}
+                  ports:
+                    - protocol: TCP
+                      port: 9093
+            """))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("NetworkPolicy allow-api-and-web-audio admits TCP 9093", r.stdout)
+
+    def test_passes_when_a_policy_selecting_every_pod_admits_other_ports_only(self):
+        r = self._run(policy=_POLICY + textwrap.dedent("""\
+            ---
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-blackbox-from-monitoring
+              namespace: r55-platform
+            spec:
+              podSelector: {}
+              ingress:
+                - from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: monitoring
+                  ports:
+                    - protocol: TCP
+                      port: 5000
+            """))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_passes_when_a_policy_selects_a_label_the_api_pod_does_not_carry(self):
+        rendered = _RENDERED.replace("spec:\n  template:\n    spec:\n      initContainers:\n        - name: wait-for-postgres",
+                                     "spec:\n  template:\n    metadata:\n      labels:\n"
+                                     "        app.kubernetes.io/name: platform-api\n"
+                                     "        app.kubernetes.io/component: api\n"
+                                     "    spec:\n      initContainers:\n        - name: wait-for-postgres", 1)
+        self.assertIn("app.kubernetes.io/component: api", rendered)
+        wide = textwrap.dedent("""\
+            ---
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-component-audio
+              namespace: r55-platform
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/component: COMPONENT
+              ingress:
+                - from:
+                    - namespaceSelector: {}
+            """)
+        r = self._run(policy=_POLICY + wide.replace("COMPONENT", "frontend"), rendered=rendered)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self._run(policy=_POLICY + wide.replace("COMPONENT", "api"), rendered=rendered)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("NetworkPolicy allow-component-audio admits TCP 9093", r.stdout)
+
     def test_fails_when_the_policy_selects_another_workload(self):
         r = self._run(policy=_POLICY.replace("app.kubernetes.io/name: platform-api", "app.kubernetes.io/name: web"))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
