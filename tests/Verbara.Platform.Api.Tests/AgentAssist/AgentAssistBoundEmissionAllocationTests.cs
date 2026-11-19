@@ -17,7 +17,8 @@ namespace Verbara.Platform.Api.Tests.AgentAssist;
 /// agent-assist-works-end-to-end (design D15, the <c>BridgeEmission</c> leg): a bound session's emission path allocates
 /// what the event itself needs and almost nothing more. The floor is the same four records built and published straight
 /// on the bus; the bound path goes through the bridge and <c>AgentAssistSessionIdentity</c> (bind check, lock, record
-/// built with the bound identity and its emission time). D15 predicts at most 64 B per event over the floor.
+/// built with the bound identity and its emission time). D15 predicts at most 64 B per event over the floor; the test holds
+/// the measured figure instead (see <see cref="MaxBytesPerEventOverFloor"/>).
 /// </summary>
 public sealed class AgentAssistBoundEmissionAllocationTests(ITestOutputHelper output) : IDisposable
 {
@@ -27,7 +28,15 @@ public sealed class AgentAssistBoundEmissionAllocationTests(ITestOutputHelper ou
     private const string AgentGuid = "11111111111111111111111111111111";
     private const string SessionId = "as-alloc-1";
     private const int Rounds = 2_000;
-    private const int MaxBytesPerEventOverFloor = 64;
+
+    /// <summary>
+    /// The measured 36 B per event over the floor (the same in every run: the counter is exact per thread) plus a 4 B
+    /// margin. The figure is an average over the four event kinds, so one extra heap object (24 B at least) on one
+    /// factory adds 6 B per event and goes over, and a per-emission capturing closure on one factory adds 24 B (60 B per
+    /// event, which D15's 64 B line let through). The margin absorbs up to 16 B per round of four, an object-alignment
+    /// change in a runtime update, not a new allocation.
+    /// </summary>
+    private const int MaxBytesPerEventOverFloor = 40;
 
     private static readonly string Text120 = new('x', 120);
     private static readonly string[] TriggerWords = ["again", "third time"];
@@ -59,7 +68,7 @@ public sealed class AgentAssistBoundEmissionAllocationTests(ITestOutputHelper ou
     }
 
     [Fact]
-    public void Emit_ShouldAllocateAtMost64BytesPerEventOverTheFloor_WhenTheSessionIsBound()
+    public void Emit_ShouldAllocateAtMost40BytesPerEventOverTheFloor_WhenTheSessionIsBound()
     {
         BindSession();
 
@@ -85,7 +94,7 @@ public sealed class AgentAssistBoundEmissionAllocationTests(ITestOutputHelper ou
         var boundPerEvent = boundBytes / (4.0 * Rounds);
         output.WriteLine($"floor {floorPerEvent:F1} B/event, bound {boundPerEvent:F1} B/event, over floor {boundPerEvent - floorPerEvent:F1} B/event");
         (boundPerEvent - floorPerEvent).Should().BeLessThanOrEqualTo(MaxBytesPerEventOverFloor,
-            because: "the bound path builds each record once, in place, with no per-emission closure (D15: floor {0:F1} B, bound {1:F1} B per event)",
+            because: "the bound path builds each record once, in place, with no per-emission closure (measured 36 B per event over the floor; floor {0:F1} B, bound {1:F1} B per event)",
             floorPerEvent, boundPerEvent);
     }
 
