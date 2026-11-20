@@ -841,10 +841,7 @@ builder.Services.TryAddSingleton<Verbara.Platform.Identity.Auth.Jwt.IJwtKeyStore
 builder.Services.AddSingleton<Verbara.Platform.Identity.Auth.Jwt.IJwtKeyRotationService,
     Verbara.Platform.Identity.Auth.Jwt.JwtKeyRotationService>();
 
-builder.Services.AddSingleton<RefreshTokenService>();
-builder.Services.AddSingleton<AuthEventService>();
-builder.Services.AddSingleton<AccountLockoutService>();
-builder.Services.AddSingleton<SessionService>();
+builder.Services.AddPlatformSignInServices(builder.Configuration);
 // R5.2 PA.1 — MFA admin service backing /management/mfa endpoints.
 builder.Services.AddSingleton<
     Verbara.Platform.Api.Endpoints.Mfa.IMfaAdminService,
