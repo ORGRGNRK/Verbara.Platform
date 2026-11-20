@@ -9,17 +9,17 @@ namespace Verbara.Platform.Api.Tests.Sse;
 
 /// <summary>
 /// agent-assist-works-end-to-end (design D12, sending half): the four <c>agentassist.*</c> records cross pods in the
-/// backplane payload. Serialized as the relay serializes them (the runtime type, with the
-/// <see cref="PlatformPushJsonContext"/> options the Api configures) and decoded as the receiver decodes them, every member
-/// comes back equal, <c>timestamp</c> included, and the SSE frame written from the decoded copy is byte-identical to the
-/// frame written from the original.
+/// backplane payload. Serialized as the relay serializes them (the runtime type, with the options the Api configures,
+/// which answer these types from <see cref="PlatformPushJsonContext"/>) and decoded as the receiver decodes them, every
+/// member comes back equal, <c>timestamp</c> included, and the SSE frame written from the decoded copy is
+/// byte-identical to the frame written from the original.
 /// </summary>
 public sealed class AgentAssistCrossPodWireTests
 {
     private static readonly DateTimeOffset At = new(2026, 11, 3, 10, 43, 0, 120, TimeSpan.Zero);
 
     /// <summary>The options the Api hands the relay (<c>PushProOptions.PayloadSerializerOptions</c>).</summary>
-    internal static readonly JsonSerializerOptions BackplaneOptions = new() { TypeInfoResolver = PlatformPushJsonContext.Default };
+    internal static readonly JsonSerializerOptions BackplaneOptions = Verbara.Platform.Api.Serialization.PushRelayPayloadSerialization.CreateOptions();
 
     public static TheoryData<string> Types() => new()
     {

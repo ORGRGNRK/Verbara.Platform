@@ -21,10 +21,6 @@ namespace Verbara.Platform.Api.Serialization;
 [JsonSourceGenerationOptions(
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 // Platform events that stay on this process (not ICrossPodEvent).
-[JsonSerializable(typeof(AgentAssistComplianceAlertEvent))]
-[JsonSerializable(typeof(AgentAssistSentimentEvent))]
-[JsonSerializable(typeof(AgentAssistSuggestionEvent))]
-[JsonSerializable(typeof(AgentAssistTranscriptEvent))]
 [JsonSerializable(typeof(AgentCapacityChangedEvent))]
 [JsonSerializable(typeof(CampaignDispositionSubmittedEvent))]
 [JsonSerializable(typeof(CampaignMetricsUpdatedEvent))]
