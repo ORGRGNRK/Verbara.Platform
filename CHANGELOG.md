@@ -102,6 +102,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The shipped Docker stacks no longer run the Api and Asterisk out of open files under load.** Docker starts a
+  container with a soft limit of 1024 open files, and neither the native-AOT Api nor Asterisk raised it. With Agent
+  Assist listening, each call holds about four descriptors in the Api (two AudioSocket streams, two speech-to-text
+  connections), so near 250 calls the Api reached 1024: AudioSocket connections were refused (`SocketException (23):
+  Too many open files in system`, the process limit despite the wording), the calls went on unassisted, and the same replica's database connections and DNS lookups
+  failed with "Unknown socket error". Asterisk reached its 1024 with about 57 such calls. `platform-api` now gets
+  `ulimits: nofile: 65536` in `docker/docker-compose.full.yml` (and so in the `smb` and `scale` overlays),
+  `docker-compose.production.yml`, `docker-compose.reference-smb.yml` and the `docker-compose.verified.yml` template;
+  `docker/asterisk-config/asterisk.conf` sets `maxfiles = 65536`, which Asterisk applies itself at start-up, in every
+  stack that mounts that file. On Kubernetes the limit comes from the node's container runtime: check it there.
+- **`RTP_PORT_START` / `RTP_PORT_END` in `.env.reference-smb` now set Asterisk's RTP range.** The SMB manuals size the
+  tiers by raising `RTP_PORT_END`, but nothing passed it to Asterisk, which kept `rtp.conf`'s 20000-20200 (about 100
+  channels, so about 50 calls bridged to an agent). The reference stack passes both variables to Asterisk, and
+  `entrypoint-asterisk.sh` writes them into `rtp.conf` at start-up when they are set (and says so in the log when the
+  file is not writable). Unset, `rtp.conf` keeps its own range, as before.
 - **A busy replica no longer loses live events at 250 calls.** The Api and Realtime push bus kept 256 events, about
   one second of traffic at 250 concurrent calls; a replica that fell behind for longer, as one did in a lab run while
   250 agents signed in again during the call ramp, evicted the oldest events for good (transcripts and sentiment never
