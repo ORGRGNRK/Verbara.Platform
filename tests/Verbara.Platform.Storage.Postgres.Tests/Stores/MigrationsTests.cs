@@ -149,8 +149,9 @@ public class MigrationsTests : IClassFixture<MigrationsFixture>
                         && n.EndsWith(".sql", StringComparison.Ordinal))
             .Order(StringComparer.Ordinal)
             .ToList();
-        names[^1].Should().Be("Verbara.Platform.Storage.Postgres.Migrations.030_QueueLastAgentRouting.sql",
-            "030 runs after 029, the last migration before it");
+        names.IndexOf("Verbara.Platform.Storage.Postgres.Migrations.030_QueueLastAgentRouting.sql")
+            .Should().Be(names.IndexOf("Verbara.Platform.Storage.Postgres.Migrations.029_AuditContactCategory.sql") + 1,
+                "030 runs right after 029");
         names.Should().ContainSingle(n => n.Contains(".030_", StringComparison.Ordinal), "one migration per ordinal");
 
         (await _fixture.ColumnDefinitionAsync("queue_configs", "last_agent_routing_enabled"))
@@ -160,5 +161,73 @@ public class MigrationsTests : IClassFixture<MigrationsFixture>
 
         (await _fixture.ColumnDefinitionAsync("queue_configs", "last_agent_routing_enabled"))
             .Should().Be(("boolean", true));
+    }
+
+    // agent-assist-works-end-to-end: the shared Agent Assist feature state (one row) and the per-call claims, the last
+    // migration, idempotent.
+    [Fact]
+    public async Task Migration031_ShouldCreateTheAgentAssistStateAndCallClaimTables_AndBeIdempotent()
+    {
+        var names = typeof(ServiceCollectionExtensions).Assembly.GetManifestResourceNames()
+            .Where(n => n.StartsWith("Verbara.Platform.Storage.Postgres.Migrations.", StringComparison.Ordinal)
+                        && n.EndsWith(".sql", StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        names[^1].Should().Be("Verbara.Platform.Storage.Postgres.Migrations.031_AgentAssistSharedState.sql",
+            "031 runs after 030, the last migration before it");
+        names.Should().ContainSingle(n => n.Contains(".031_", StringComparison.Ordinal), "one migration per ordinal");
+
+        await AssertAgentAssistTablesAsync();
+
+        await _fixture.ReapplyMigrationAsync("031_AgentAssistSharedState.sql");
+
+        await AssertAgentAssistTablesAsync();
+    }
+
+    [Fact]
+    public async Task Migration031_ShouldKeepOneFeatureStateRow_WhenASecondRowIsInserted()
+    {
+        await using var conn = await _fixture.DataSource.OpenConnectionAsync();
+        await using (var seed = conn.CreateCommand())
+        {
+            seed.CommandText =
+                "INSERT INTO agent_assist_feature_state (enabled, provider, updated_at, updated_by) " +
+                "VALUES (false, NULL, now(), 'appsettings') ON CONFLICT DO NOTHING";
+            await seed.ExecuteNonQueryAsync();
+            await seed.ExecuteNonQueryAsync();
+        }
+
+        await using (var count = conn.CreateCommand())
+        {
+            count.CommandText = "SELECT count(*) FROM agent_assist_feature_state";
+            (await count.ExecuteScalarAsync()).Should().Be(1L, "the feature state is one row for the deployment");
+        }
+
+        await using var other = conn.CreateCommand();
+        other.CommandText =
+            "INSERT INTO agent_assist_feature_state (id, enabled, updated_at, updated_by) VALUES (2, true, now(), 'x')";
+        var insert = async () => await other.ExecuteNonQueryAsync();
+        await insert.Should().ThrowAsync<Npgsql.PostgresException>()
+            .Where(e => e.SqlState == Npgsql.PostgresErrorCodes.CheckViolation, "no second row can be added by id");
+    }
+
+    private async Task AssertAgentAssistTablesAsync()
+    {
+        (await _fixture.ColumnDefinitionAsync("agent_assist_feature_state", "enabled")).Should().Be(("boolean", false));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_feature_state", "provider")).Should().Be(("text", true));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_feature_state", "protected_credentials"))
+            .Should().Be(("jsonb", true));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_feature_state", "updated_at"))
+            .Should().Be(("timestamp with time zone", false));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_feature_state", "updated_by")).Should().Be(("text", false));
+
+        (await _fixture.ColumnDefinitionAsync("agent_assist_call_claims", "call_key")).Should().Be(("text", false));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_call_claims", "claim_id")).Should().Be(("uuid", false));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_call_claims", "owner")).Should().Be(("text", false));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_call_claims", "generation")).Should().Be(("bigint", false));
+        (await _fixture.ColumnDefinitionAsync("agent_assist_call_claims", "claimed_at"))
+            .Should().Be(("timestamp with time zone", false));
+        (await _fixture.PrimaryKeyColumnsAsync("agent_assist_call_claims")).Should().Equal("call_key");
+        (await _fixture.PrimaryKeyColumnsAsync("agent_assist_feature_state")).Should().Equal("id");
     }
 }

@@ -285,6 +285,8 @@ public sealed record TypificationSubmittedEvent(
     : PlatformEvent(TenantId, "typification.submitted", DateTimeOffset.UtcNow), ICrossPodEvent;
 
 // ─── Agent Assist Events ──────────────────────────────────────────────────────
+// Cross-pod: the engine runs on one replica and an agent's stream may be served by another. Api replicas emit a received
+// copy on their streams only (CrossPodStreamReceiver); Realtime acknowledges them and publishes nothing.
 
 /// <summary>Raised when an agent assist suggestion is generated for a live call.</summary>
 public sealed record AgentAssistSuggestionEvent(
@@ -297,9 +299,12 @@ public sealed record AgentAssistSuggestionEvent(
     string Priority,
     string Source,
     string? TriggerPhrase)
-    : PlatformEvent(TenantId, "agentassist.suggestion", DateTimeOffset.UtcNow), IConversationContentEvent
+    : PlatformEvent(TenantId, "agentassist.suggestion", DateTimeOffset.UtcNow), IConversationContentEvent, ICrossPodEvent
 {
-    /// <summary>Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never serialized.</summary>
+    /// <summary>
+    /// Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never
+    /// serialized: it is computed from <c>AgentId</c>, which is, so a copy decoded on another replica has the same audience.
+    /// </summary>
     [JsonIgnore]
     public ConversationAudience Audience { get; } = ConversationAudience.ForAgent(AgentId);
 }
@@ -314,9 +319,12 @@ public sealed record AgentAssistSentimentEvent(
     float Score,
     string Label,
     IReadOnlyList<string> TriggerWords)
-    : PlatformEvent(TenantId, "agentassist.sentiment", DateTimeOffset.UtcNow), IConversationContentEvent
+    : PlatformEvent(TenantId, "agentassist.sentiment", DateTimeOffset.UtcNow), IConversationContentEvent, ICrossPodEvent
 {
-    /// <summary>Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never serialized.</summary>
+    /// <summary>
+    /// Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never
+    /// serialized: it is computed from <c>AgentId</c>, which is, so a copy decoded on another replica has the same audience.
+    /// </summary>
     [JsonIgnore]
     public ConversationAudience Audience { get; } = ConversationAudience.ForAgent(AgentId);
 }
@@ -330,9 +338,12 @@ public sealed record AgentAssistComplianceAlertEvent(
     string RuleId,
     string? Phrase,
     string Severity)
-    : PlatformEvent(TenantId, "agentassist.compliance_alert", DateTimeOffset.UtcNow), IConversationContentEvent
+    : PlatformEvent(TenantId, "agentassist.compliance_alert", DateTimeOffset.UtcNow), IConversationContentEvent, ICrossPodEvent
 {
-    /// <summary>Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never serialized.</summary>
+    /// <summary>
+    /// Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never
+    /// serialized: it is computed from <c>AgentId</c>, which is, so a copy decoded on another replica has the same audience.
+    /// </summary>
     [JsonIgnore]
     public ConversationAudience Audience { get; } = ConversationAudience.ForAgent(AgentId);
 }
@@ -346,9 +357,12 @@ public sealed record AgentAssistTranscriptEvent(
     string Speaker,
     string Text,
     bool IsFinal)
-    : PlatformEvent(TenantId, "agentassist.transcript", DateTimeOffset.UtcNow), IConversationContentEvent
+    : PlatformEvent(TenantId, "agentassist.transcript", DateTimeOffset.UtcNow), IConversationContentEvent, ICrossPodEvent
 {
-    /// <summary>Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never serialized.</summary>
+    /// <summary>
+    /// Only the agent the event names in <c>AgentId</c>, never the conversation's owner or offered agent (design D17). Never
+    /// serialized: it is computed from <c>AgentId</c>, which is, so a copy decoded on another replica has the same audience.
+    /// </summary>
     [JsonIgnore]
     public ConversationAudience Audience { get; } = ConversationAudience.ForAgent(AgentId);
 }

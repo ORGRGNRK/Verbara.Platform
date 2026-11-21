@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
+using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Api.Tests.AgentAssist;
 using Verbara.Sdk.Pro.AgentAssist.Features;
 using FluentAssertions;
@@ -39,6 +40,23 @@ public sealed class AgentAssistFeatureEndpointsTests : IClassFixture<AgentAssist
         // apiKeyMasked must be null OR "***", never the raw secret
         var masked = json["apiKeyMasked"];
         (masked is null || masked.GetValue<string>() == "***").Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetFeature_ShouldAnswerTheStoredState_NotTheEngineCache()
+    {
+        var store = new SplitFeatureStore();
+        await using var factory = new AgentAssistTenantScopeApiFactory { FeatureStore = store };
+        using var client = factory.PlatformOperatorClient();
+
+        var response = await client.GetAsync("/api/v1/admin/features/agent-assist");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        json["enabled"]!.GetValue<bool>().Should().BeTrue(
+            because: "the administrator's GET reads the stored state directly, never the engine's cached answer");
+        json["updatedBy"]!.GetValue<string>().Should().Be("stored");
+        store.EngineReads.Should().Be(0);
     }
 
     [Fact]
@@ -134,4 +152,147 @@ public sealed class AgentAssistFeatureEndpointsTests : IClassFixture<AgentAssist
 
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
+
+    // ─── PUT: live providers and WebSocket endpoints ────────────────────────
+
+    [Theory]
+    [InlineData("whisper")]
+    [InlineData("azure-whisper")]
+    [InlineData("google")]
+    public async Task UpdateFeature_ShouldReturn400NamingTheReason_AndKeepState_WhenProviderIsNotLive(string provider)
+    {
+        await using var factory = new AgentAssistTenantScopeApiFactory();
+        using var client = factory.PlatformOperatorClient();
+        var toggle = factory.Services.GetRequiredService<IAgentAssistFeatureToggle>();
+        var before = await toggle.GetCurrentAsync();
+
+        var body = new
+        {
+            enabled = true,
+            provider,
+            credentials = new { apiKey = "secret-key", endpoint = "https://example.test" },
+        };
+        var response = await client.PutAsJsonAsync("/api/v1/admin/features/agent-assist", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        var messages = json["errors"]!["provider"]!.AsArray().Select(m => m!.GetValue<string>()).ToList();
+        messages.Should().ContainSingle().Which.Should().Be(
+            $"Provider '{provider}' cannot transcribe a live call: its recognizer returns text only after the audio ends. Live providers: deepgram.");
+        json["errors"]!["credentials"].Should().BeNull(
+            because: "the provider is refused before the credentials are looked at");
+
+        var after = await toggle.GetCurrentAsync();
+        after.Should().Be(before, because: "a refused PUT leaves the stored state unchanged");
+    }
+
+    [Theory]
+    [InlineData("https://example.test")]
+    [InlineData("http://api.deepgram.com")]
+    [InlineData("ftp://api.deepgram.com")]
+    [InlineData("api.deepgram.com")]
+    [InlineData("/v1/listen")]
+    [InlineData("wss//api.deepgram.com")]
+    public async Task UpdateFeature_ShouldReturn400OnCredentials_AndKeepState_WhenEndpointIsNotAWebSocketUri(string endpoint)
+    {
+        await using var factory = new AgentAssistTenantScopeApiFactory();
+        using var client = factory.PlatformOperatorClient();
+        var toggle = factory.Services.GetRequiredService<IAgentAssistFeatureToggle>();
+        var before = await toggle.GetCurrentAsync();
+
+        var body = new
+        {
+            enabled = true,
+            provider = "deepgram",
+            credentials = new { apiKey = "secret-key", endpoint },
+        };
+        var response = await client.PutAsJsonAsync("/api/v1/admin/features/agent-assist", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        var messages = json["errors"]!["credentials"]!.AsArray().Select(m => m!.GetValue<string>()).ToList();
+        messages.Should().ContainSingle().Which.Should().Be("endpoint must be an absolute ws:// or wss:// URI.");
+
+        var after = await toggle.GetCurrentAsync();
+        after.Should().Be(before, because: "a refused PUT leaves the stored state unchanged");
+    }
+
+    [Fact]
+    public async Task UpdateFeature_ShouldReturn400OnCredentials_WhenDisablingWithAnHttpEndpoint()
+    {
+        await using var factory = new AgentAssistTenantScopeApiFactory();
+        using var client = factory.PlatformOperatorClient();
+
+        // What the feature page sends to switch off, plus an endpoint it should not carry.
+        using var body = new StringContent(
+            """{"enabled":false,"provider":null,"credentials":{"apiKey":null,"endpoint":"https://example.test"}}""",
+            System.Text.Encoding.UTF8,
+            "application/json");
+        var response = await client.PutAsync("/api/v1/admin/features/agent-assist", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        json["errors"]!["credentials"]!.AsArray().Should().ContainSingle();
+    }
+
+    [Theory]
+    [InlineData("wss://api.deepgram.com")]
+    [InlineData("ws://127.0.0.1:8080/v1/listen")]
+    public async Task UpdateFeature_ShouldReturn200WithEndpointMasked_WhenDeepgramEndpointIsAWebSocketUri(string endpoint)
+    {
+        await using var factory = new AgentAssistTenantScopeApiFactory();
+        using var client = factory.PlatformOperatorClient();
+
+        var body = new
+        {
+            enabled = true,
+            provider = "deepgram",
+            credentials = new { apiKey = "secret-key", endpoint },
+        };
+        var response = await client.PutAsJsonAsync("/api/v1/admin/features/agent-assist", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        json["enabled"]!.GetValue<bool>().Should().BeTrue();
+        json["provider"]!.GetValue<string>().Should().Be("deepgram");
+        json["credentialsConfigured"]!.GetValue<bool>().Should().BeTrue();
+        json["apiKeyMasked"]!.GetValue<string>().Should().Be("***");
+        json["endpointMasked"]!.GetValue<string>().Should().Be("***");
+        json["updatedAt"].Should().NotBeNull();
+        json["updatedBy"].Should().NotBeNull();
+
+        var toggle = factory.Services.GetRequiredService<IAgentAssistFeatureToggle>();
+        var state = await toggle.GetCurrentAsync();
+        state.ProtectedCredentials!.Should().ContainKey("endpoint");
+        state.ProtectedCredentials!["endpoint"].Should().NotBe(endpoint,
+            because: "the endpoint is encrypted like the key");
+    }
+}
+
+/// <summary>
+/// A feature store whose engine-path answer (<c>GetCurrentAsync</c>) differs from the stored state (<c>ReadAsync</c>),
+/// as a replica's engine cache does for up to five seconds after another replica's write.
+/// </summary>
+internal sealed class SplitFeatureStore : IAgentAssistFeatureStore
+{
+    private static readonly AgentAssistFeatureState Stored = new(
+        Enabled: true, Provider: "deepgram", ProtectedCredentials: null, UpdatedAt: DateTimeOffset.UnixEpoch, UpdatedBy: "stored");
+
+    private int _engineReads;
+
+    public int EngineReads => Volatile.Read(ref _engineReads);
+
+    public ValueTask<AgentAssistFeatureState> GetCurrentAsync(CancellationToken ct = default)
+    {
+        Interlocked.Increment(ref _engineReads);
+        return ValueTask.FromResult(AgentAssistFeatureState.Disabled);
+    }
+
+    public ValueTask<AgentAssistFeatureState> ReadAsync(CancellationToken ct = default) => ValueTask.FromResult(Stored);
+
+    public ValueTask<AgentAssistFeatureState> ReadForSessionAsync(CancellationToken ct = default) =>
+        ValueTask.FromResult(Stored);
+
+    public ValueTask<AgentAssistFeatureState> SetAsync(AgentAssistFeatureState desired, CancellationToken ct = default) =>
+        ValueTask.FromResult(desired);
 }

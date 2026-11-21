@@ -81,6 +81,19 @@ public sealed class AgentAssistLiveSessionsRegisteredSessionTests
             "the call's late stamp is read through the registered session's call");
     }
 
+    [Fact]
+    public async Task Snapshot_ShouldCarryNoSentiment_WhenARegisteredSessionHasNoCallerReadingYet()
+    {
+        var call = new CallSession("aa-reg-sentiment", "1712345678.22", ServerId, CallDirection.Inbound) { TenantId = Acme };
+        await using var engine = await RegisteredEngine.StartAsync(call);
+
+        engine.Supervisor.ActiveSessions[call.SessionId].Context.LatestCallerSentiment.Should().BeNull("precondition: no reading yet");
+
+        var live = new AgentAssistLiveSessions(engine.Supervisor).Snapshot();
+
+        live.Should().ContainSingle().Which.Sentiment.Should().BeNull("the list's sentiment is null before the first reading");
+    }
+
     /// <summary>The Pro engine running in a bare container, with one session registered for a given call.</summary>
     private sealed class RegisteredEngine : IAsyncDisposable
     {

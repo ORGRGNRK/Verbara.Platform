@@ -1,156 +1,140 @@
-# AgentAssist Runtime Setup
+# Agent Assist setup
 
-**Audience:** Platform operators enabling or rotating the AI provider
-powering AgentAssist for a tenant. Shipped in Platform v1.10.0 + Pro
-v1.12.0-pro (R5.1 Task J).
+**Audience:** operators who turn Agent Assist on for a Platform deployment, rotate its speech provider credentials,
+or run it with more than one Api replica.
 
-## What the runtime toggle does
+Agent Assist listens to an answered queue call while it is in progress, transcribes both parties and sends the agent
+live transcript lines and the caller's sentiment on `GET /api/v1/events/stream`. Supervisors see the assisted calls
+in `GET /api/v1/supervisor/sessions/active` (the console's Monitor list). It needs the Agent Assist licence module.
 
-`Verbara.Sdk.Pro.AgentAssist` exposes `IAgentAssistFeatureToggle`, a
-consumer-supplied gate that the `AgentAssistEngine` consults at the
-start of every call session. When the toggle returns `false`, the
-engine:
+## How a call is assisted
 
-1. Emits `agentassist.session.skipped` counter (`Verbara.Sdk.Pro.AgentAssist` meter).
-2. Returns immediately — no provider is started, no tokens are consumed,
-   no audio snoop is opened.
+1. A queue call is answered. The Api replica that holds the voice AMI connection (the voice leader) decides whether
+   to assist it: Agent Assist must be switched on (see **Switching it on**), the call must have a linked id, and the
+   per-call claim must be free (see **More than one Api replica**).
+2. That replica creates a snoop on each party's channel through ARI, in its own node Stasis app, and sets two
+   channel variables on each snoop: `AUDIOSOCKET_UUID` (the snoop's own id) and `AUDIOSOCKET_HOST` (this replica's
+   audio address, `host:port`).
+3. Asterisk runs the snoop through the `[agentassist]` context, which connects it to that address with AudioSocket.
+4. The replica streams the audio to the speech provider and publishes the results for the agent the call is
+   connected to, and for the users of the call's tenant who read every conversation.
 
-Platform v1.10.0 registers an always-present Platform-backed
-implementation of this toggle so operators can flip AgentAssist on or off
-**without a redeploy** and can rotate provider credentials without
-restarting the API node.
+## Settings
 
-## Endpoint surface
+| Setting (environment form) | Default | What it does |
+|---|---|---|
+| `AgentAssist__AudioSocket__AdvertisedHost` | none | The host Asterisk connects to for this replica's snoops. `auto`: the replica's own address on its route to the ARI host, resolved when the first call needs it. A literal host name or IP is used as given. It must name this replica only, never a service name that resolves to several replicas. |
+| `AgentAssist__AudioSocket__Port` | `9093` | The port this replica listens on for snoop audio, and the port in its advertised address. |
+| `AgentAssist__Deepgram__Language` | none | The language calls are transcribed in. Required: without it a session transcribes nothing. |
+| `AgentAssist__Deepgram__Model` | the recognizer's default | The Deepgram model. |
+| `AgentAssist__Enabled`, `AgentAssist__Provider`, `AgentAssist__Deepgram__ApiKey`, `AgentAssist__Deepgram__Endpoint` | off | Seed the stored on/off state, provider and credentials until an administrator first writes them through the route below. |
 
-Routes live under `/api/v1/admin/features/agent-assist` and require the
-`features:agent-assist:manage` permission (seeded into the
-`platform_admin` role template — see **RBAC hot-reload** below).
+The shipped compose files set `AgentAssist__AudioSocket__AdvertisedHost: auto`. The audio stays inside the compose
+network, so no port is published for it.
 
-| Verb | Path | Body | Returns |
-|------|------|------|---------|
-| `GET`  | `/api/v1/admin/features/agent-assist` | — | `{ enabled, provider, lastUpdatedUtc, lastUpdatedBy }` — credentials never surfaced |
-| `PUT`  | `/api/v1/admin/features/agent-assist` | `{ enabled, provider, apiKey?, voiceId?, region?, endpoint? }` | 204 |
+The Helm chart (`infra/k8s/helm/platform`) sets the address from `api.agentAssist.advertisedHost`, default
+`$(POD_IP)` (the pod IP, from `status.podIP`), and declares the port as `containerPort` `aa-audio` from
+`api.agentAssist.audioSocketPort` (default `9093`). No Service fronts the port: Asterisk connects to the pod that
+created the snoop. The `r55-platform` default-deny policy drops that connection unless the policy
+`allow-agentassist-audio` of `infra/k8s/manifests/network-policies.yaml` is applied: it admits TCP 9093 to
+`platform-api` from the `r55-asterisk` namespace. If you change the port, change it in that policy too. The chart
+supports an Asterisk that runs in the cluster's `r55-asterisk` namespace only: the policy admits no other source, and
+`api.agentAssist.advertisedHost` is one value for every replica, so a literal address in it names the right replica
+only when there is one.
 
-The `PUT` body is validated against a provider whitelist with
-normalization (trim + lowercase). Supported values:
+The Api never fails to start over the address. When it is not set, or `auto` finds no route, each call is skipped
+(no snoop is created), counted as `agentassist_sessions_skipped_total{reason="no_advertised_address"}`, and one
+Warning names the missing setting.
 
-- `deepgram`
-- `whisper`
-- `azure-whisper`
-- `google`
-- `elevenlabs`
-- `azure-tts`
+## The Asterisk dialplan
 
-Unknown providers return `400 Bad Request` with a descriptive message.
+An Asterisk used with Agent Assist must carry the `[agentassist]` context of `docker/asterisk-config/extensions.conf`
+verbatim:
 
-## Credential storage
-
-Credentials (`apiKey`, `voiceId`, `region`, `endpoint`) are wrapped via
-`IDataProtectionProvider` before being persisted by the runtime feature
-store. The `GET` endpoint never surfaces them. Rotation is a simple
-`PUT` with the new values; the engine picks them up on the next
-session start (no restart required).
-
-## RBAC hot-reload for existing tenants
-
-The permission `features:agent-assist:manage` is added to
-`RoleTemplateSeeder.AllPermissions()` and lands automatically on
-fresh tenant seeds. **Existing tenants created before Platform v1.10.0
-do NOT receive the new permission automatically.** To grant it, either:
-
-1. Re-run the role seeder against the tenant (recommended):
-   ```sh
-   dotnet run --project tools/RoleReseed -- --tenant-id <id>
-   ```
-2. Or add the permission row manually to the `platform_admin` tenant role:
-   ```sql
-   INSERT INTO tenant_role_permissions (tenant_id, role_name, permission)
-   VALUES ('<tenant-id>', 'platform_admin', 'features:agent-assist:manage');
-   ```
-
-Tracked in the **Platform v1.10 release runbook** as a required
-migration step before any existing-tenant operator expects to use the
-UI.
-
-## DataProtection keyring persistence
-
-> **R5.2 (Platform 1.11.0): DB-backed by default.** Per [ADR-0003], `Program.cs`
-> registers `PlatformDataProtectionDbContext` at startup and ASP.NET Core
-> persists the keyring to the `data_protection_keys` table (migration `018_DataProtectionKeys.sql`).
-> No operator action is required for the default flow — the same keyring is shared
-> across all Platform.Api replicas reading the same database.
->
-> **Backup procedure (R5.4 §S5.8) MUST include the `data_protection_keys` table.**
-> Losing it makes every encrypted-at-rest credential unrecoverable.
-
-### Default — DB-backed (multi-node, recommended)
-
-Already wired in `Program.cs`:
-
-```csharp
-builder.Services.AddDbContext<PlatformDataProtectionDbContext>(opt =>
-    opt.UseNpgsql(coreConnectionString));
-builder.Services.AddPlatformDataProtection(opt =>
-{
-    opt.ApplicationName = "Verbara.Platform";
-});
+```text
+[agentassist]
+exten => audiosocket,1,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST})
+ same => n,Hangup()
 ```
 
-`AgentAssistCredentialsProtector` consumes the resulting `IDataProtectionProvider`
-transparently. Container recycles preserve all encrypted credentials.
+`AUDIOSOCKET_HOST` already holds `host:port`. A port written in the dialplan makes the address unreachable, and no
+call is transcribed.
 
-### Override — file-system mode (single-node deploys)
+The Helm Asterisk chart (`infra/k8s/helm/asterisk`) is a load-test PBX: its dialplan answers, waits and hangs up, and
+routes no call to a queue or an agent. It carries no `[agentassist]` context, and this release does not add one, so
+no call on that chart is ever assisted. What the platform chart ships for Kubernetes is the Api side (the advertised
+address, the container port and the NetworkPolicy above), for an Asterisk you provide that runs Platform's voice
+dialplan, inside the pod network or outside it.
 
-If a deploy doesn't have a Postgres connection (rare) or prefers a mounted volume:
+## Switching it on
 
-```csharp
-builder.Services.AddPlatformDataProtection(opt =>
-{
-    opt.ApplicationName = "Verbara.Platform";
-    opt.UseFileSystem("/var/lib/verbara-platform/dataprotection-keys");
-});
-```
+Agent Assist has one state for the whole deployment: on or off, the speech provider and its credentials. Only the
+Platform tenant changes it: an admin of the Platform tenant, a Platform-tenant user holding
+`features:agent-assist:manage`, or a management API key scoped to that tenant. Any other tenant's caller gets 403.
 
-Pair with `docker-compose.yml`:
+| Verb | Path | Body | Answer |
+|---|---|---|---|
+| `GET` | `/api/v1/admin/features/agent-assist` | none | 200 `{ enabled, provider, credentialsConfigured, apiKeyMasked, endpointMasked, updatedAt, updatedBy }` |
+| `PUT` | `/api/v1/admin/features/agent-assist` | `{ enabled, provider, credentials: { apiKey, endpoint } }` | 200 with the same body as `GET` |
 
-```yaml
-platform-api:
-  volumes:
-    - ./data/dataprotection-keys:/var/lib/verbara-platform/dataprotection-keys
-```
+- `enabled` true accepts `provider` `deepgram` only, with `credentials.apiKey`. Deepgram streams text while the call
+  is in progress. `whisper`, `azure-whisper` and `google` answer 400: their recognizer returns text only after the
+  audio ends, so it cannot transcribe a call that is still in progress.
+- `credentials.endpoint` is optional and, when present, must be an absolute `ws://` or `wss://` URI.
+- Credentials are encrypted with the deployment's DataProtection keyring before they are stored and are never
+  returned (`"***"` when set). Back up the `data_protection_keys` table with the database: without it the stored
+  credentials cannot be decrypted.
+- With a `Postgres` connection string the state is stored in the database and shared by every replica, and a change
+  applies to the next call on any replica, with no restart. Without a database it is held in memory on the replica
+  that received the `PUT`.
 
-### Override — ephemeral mode (test/CI only)
+Deepgram transcription in this release is verified against a protocol fake only, not against Deepgram's live
+service.
 
-```csharp
-opt.UseEphemeralKeysForTesting();
-```
+## More than one Api replica
 
-Production callers MUST NOT use this — encrypted credentials are lost on every
-process restart. The DI extension emits a startup warning when this mode is
-selected so misconfigurations are loud in logs.
+**The leader runs the sessions.** Only the replica that holds the voice AMI connection (the voice leader) creates
+snoops and runs sessions; the others start none for a call and count it as `agentassist_sessions_gated_total`. Each
+session also takes a per-call claim in the Platform database before it creates a snoop, so a call has at most one
+session even while leadership moves between replicas. A call another replica already claimed is skipped as
+`agentassist_sessions_skipped_total{reason="claim_held"}`; a claim that cannot be read or written (the database is
+unreachable, or the call has no linked id) skips the call as `reason="claim_unavailable"`, so a call is never assisted
+twice. A deployment without the Platform database takes no claim and keeps the on/off state in memory: it is
+supported on one Api replica only.
+
+**Every replica needs the Redis backplane.** An agent's event stream and a supervisor's Monitor list may be served by
+a replica that is not running the session. With more than one Api replica, every replica needs
+`ConnectionStrings__Redis`, set to the same Redis as Realtime: the session's events then reach the agent from any
+replica, and the Monitor list is kept in Redis, so every replica lists the same sessions. The Helm chart and
+`docker/docker-compose.scale.yml` set it. Without it each replica serves the four `agentassist.*` events and the
+Monitor list from its own process, so Agent Assist is supported on one Api replica only.
+
+## Metrics
+
+On the Api's `/metrics`:
+
+- `agentassist_sessions_skipped_total{reason}`: calls the engine did not assist, by reason, among them
+  `no_advertised_address`, `claim_held` and `claim_unavailable`.
+- `agentassist_sessions_gated_total`: calls not assisted on this replica because it is not the voice leader.
+- `platform_agentassist_call_claim_total{outcome}`: per-call claims and releases (`claimed`, `held`, `error`,
+  `released`, `release_error`).
+- `platform_agentassist_recognizer_unavailable_total{reason}`: sessions that transcribe nothing (`disabled`,
+  `provider_not_live`, `missing_value`, for example no `AgentAssist__Deepgram__Language`).
+- `platform_agentassist_toggle_stale_total{path}`: on/off reads answered with the last known state because the
+  database failed.
+- `platform_agentassist_crosspod_received_total{outcome}`: events received from the replica running the session
+  (`delivered`, `empty_payload`, `tenant_mismatch`, `decode_error`).
+- `platform_agentassist_events_held_dropped_total{reason}`: events of a session never published because its call's
+  tenant was never resolved, conflicted, or overflowed the hold.
 
 ## Verification
 
-1. `GET /api/v1/admin/features/agent-assist` returns `{ enabled: false, … }`
-   on a fresh install.
-2. `PUT` with a valid provider + apiKey; `GET` afterwards shows
-   `enabled: true` but no apiKey value.
-3. Start an AgentAssist-eligible call; the session goes through.
-4. `PUT` with `enabled: false`; next call emits
-   `agentassist.session.skipped{tenantId=...}` counter and no provider
-   startup latency.
-
-## Metrics to watch
-
-All under meter `Verbara.Sdk.Pro.AgentAssist`:
-
-- `agentassist.session.started` — sessions that passed the toggle.
-- `agentassist.session.skipped` — sessions rejected by the toggle.
-- `agentassist.session.error` — provider or infrastructure failure.
-
-## Known limitations
-
-- **Sidebar "Features" single-item group** — the Web UI places the
-  AgentAssist toggle under a "Features" sidebar group that currently
-  has only this one entry. Accepted until a second runtime toggle lands
-  (CallAnalytics / Retention candidates). Tracked as R5.2+ polish.
+1. `GET /api/v1/admin/features/agent-assist` as a Platform-tenant admin answers 200 with `enabled` false on a fresh
+   install (unless the `AgentAssist` section seeds it).
+2. `PUT` it with `enabled` true, `provider` `deepgram` and `credentials.apiKey`; `GET` then shows `enabled` true,
+   `credentialsConfigured` true and no key.
+3. Answer a queue call. The agent's console shows transcript lines, and the call appears in the Monitor list.
+4. If nothing arrives, read `/metrics` on the voice leader: a `no_advertised_address` skip means the address is
+   missing or unresolvable; a `missing_value` recognizer count usually means `AgentAssist__Deepgram__Language` is
+   not set; no skip and no session usually means Asterisk cannot reach the audio port (on Kubernetes, the
+   NetworkPolicy above).

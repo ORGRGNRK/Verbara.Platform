@@ -28,6 +28,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   again on each request, so a renewed licence shows without a restart) or `no_transcript_source`. This release
   configures no transcript source, so the read never answers `available` true yet. The route sits with the other
   analytics reads: supervisors and admins of an operational tenant, with the analytics licence module.
+- Agent Assist configuration keys: `AgentAssist:AudioSocket:Port` (default `9093`) and
+  `AgentAssist:AudioSocket:AdvertisedHost` (a literal host, or `auto` for the replica's own address, resolved at first
+  use) say where Asterisk sends a snoop's audio; `AgentAssist:Deepgram:Model` (optional) and
+  `AgentAssist:Deepgram:Language` (required for a session to be transcribed) configure Deepgram transcription. As
+  environment variables, `AgentAssist__AudioSocket__Port` and so on. The existing `AgentAssist:Deepgram:ApiKey` and
+  `:Endpoint` seed keys are unchanged.
+- `GET /api/v1/supervisor/sessions/active` items name the agent and the caller's mood. `agentId` is now the agent the
+  session's live events name (parsed from the call's queue-member interface in the caller's tenant, falling back to
+  the call's own agent id), so the Monitor list and the agent's console agree on who takes the call; it is `null` when
+  neither is known. New `agentName` is that agent's display name in the caller's tenant, and new `sentiment` is the
+  label of the session's latest caller sentiment reading (`Positive`, `Neutral`, `Negative`, `Frustrated` or
+  `Escalating`). Both are always written, `null` when unknown or before the first reading.
 
 ### Changed — BREAKING
 
@@ -45,6 +57,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restart of this upgrade discards whatever was set through these routes: the toggle and the engine settings start again
   from the `AgentAssist` configuration section, and the keyword and compliance rules start empty. The Agent Assist
   session reads under `/api/v1/agent-assist/sessions` are unchanged.
+- **Agent Assist can be switched on only with a live speech provider.** `PUT /api/v1/admin/features/agent-assist`
+  with `enabled` true now accepts `provider` `deepgram` only. `whisper`, `azure-whisper` and `google` answer 400 with
+  an error on `provider` explaining that their recognizer returns text only after the audio ends, so it cannot
+  transcribe a call while it is in progress. `credentials.endpoint`, when present, must be an absolute `ws://` or
+  `wss://` URI, else 400 with an error on `credentials`. A refused request leaves the stored state unchanged. Member
+  names are unchanged, and a state stored earlier with one of those providers is still returned by `GET` as stored.
 - **A call analysed with an empty scorecard has no QA score.** An analysis whose scorecard had no item (a maximum
   score of 0) used to report `hasQaScore` true with `qaScore` 0. Now `GET /api/v1/analytics/cdr` and
   `GET /api/v1/analytics/cdr/{sessionId}` answer `hasQaScore` false with `qaScore` null (the detail answers
@@ -90,6 +108,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`GET /api/v1/call-analytics/sentiment/trends` and `/compliance/summary` with a queue return the analyses stored
   after the upgrade for that queue.** They returned none; analyses stored earlier carry no queue and still do not match
   (Verbara.Sdk.Pro `2.27.0-pro`, below).
+- **Each replica's node ARI client registers an app of its own.** The app named by `Asterisk:Ari:NodeApplication`
+  (default `<Asterisk:Ari:Application>-node`, for example `verbara-node`) is now followed by `-` and the replica's
+  machine name, for example `verbara-node-api-7f9c`, so two replicas never register the same app. Agent Assist creates
+  its snoop channels in that app. Anything outside the Platform that looks for the node app by its exact name must match
+  it by prefix. The Api still refuses to start when `Asterisk:Ari:NodeApplication` equals `Asterisk:Ari:Application`,
+  and now also when the name it would register does (the error names both settings and the machine name).
+- **The Agent Assist feature toggle is kept in the database.** With a `Postgres` connection string, the on/off switch,
+  provider and encrypted credentials set through `PUT /api/v1/admin/features/agent-assist` are stored in
+  `agent_assist_feature_state` and shared by every replica, so they survive a restart; the `AgentAssist` configuration
+  section seeds that row until an administrator writes it. Without a database the toggle stays in memory, as before.
 
 ### Removed
 
@@ -108,6 +136,57 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Agent Assist suggestions, sentiment, compliance alerts and transcripts reach the agent.** The service that forwards a
+  live session's results to `GET /api/v1/events/stream` was not running, so nothing was delivered. It now starts before
+  the Agent Assist engine, so a session that begins while the Api is still starting is not missed. With several
+  replicas, only the replica that holds the voice AMI connection assists calls, at most one session runs per call (a
+  claim per call in the `Postgres` database), and each session transcribes with the provider and credentials stored at
+  the moment it starts.
+- **Agent Assist results reach an agent and a supervisor on any Api replica.** The engine runs on one replica, while
+  an agent's `GET /api/v1/events/stream` and a supervisor's `GET /api/v1/supervisor/sessions/active` may be served by
+  another. With `ConnectionStrings__Redis` set, the four `agentassist.*` events now cross replicas on the Redis
+  backplane and reach the same subscribers they reach on the engine's replica (the agent the event names, and the
+  users who read every conversation of the tenant), each once and in the order they were published; a received event
+  is not sent to webhooks again. The Monitor list is kept in Redis, so every replica answers the same sessions: a
+  session is listed to its tenant within a quarter second of its call being given a tenant, and when its call is later
+  given a different tenant the former tenant stops seeing it within 5 seconds. A session's `conversationId` is still
+  looked up in the caller's tenant on each read, so a row never shows another tenant's conversation. Without Redis both stay on the one replica, as before; run a single Api replica then.
+  New counter on `/metrics`: `platform_agentassist_crosspod_received_total{outcome}` (`delivered`, `empty_payload`,
+  `tenant_mismatch`, `decode_error`).
+- **Agent Assist events carry the call's tenant, agent and conversation even when they are known late.** The four
+  `agentassist.*` events of a session used to take the call's tenant, the agent and the conversation once, when the
+  session started; a call given its tenant a moment later (a slow lookup or a replica handover) then sent every event
+  of the session with an empty `tenantId`, and no agent ever saw them. Now an event emitted before the call has a tenant
+  is held (up to 128 per session, the oldest dropped first) and published, in order, as soon as the tenant is known,
+  with the agent and conversation of that tenant. An event whose conversation is not found yet waits up to 3 seconds,
+  then goes out with an empty `conversationId`, and later events carry it once it is found. Each event keeps the time
+  it was emitted in `timestamp`. When a call is given a different tenant, later events carry the new tenant with its
+  own conversation, never the former tenant's. A session whose call and session disagree on the tenant publishes
+  nothing. Each event is published once: a failed publish is logged, no longer retried later out of order. New counter
+  on `/metrics`: `platform_agentassist_events_held_dropped_total{reason}` (`tenant_unresolved`, `conflict`,
+  `overflow`) counts held events that were never published.
+- **Agent Assist sends each snoop's audio to the replica that created it.** The listener uses
+  `AgentAssist:AudioSocket:Port`, and each snoop carries `AgentAssist:AudioSocket:AdvertisedHost` and that port as its
+  audio address, resolved when the first call needs it (`auto`: the replica's own address on its route to Asterisk).
+  When no address is set or `auto` finds no route, the Api still starts; each call is then skipped and counted, and a
+  Warning is logged once.
+- **The shipped deployment files carry the Agent Assist audio path.** The `[agentassist]` context of
+  `docker/asterisk-config/extensions.conf` (and of the demo override) appended `:9092` to `AUDIOSOCKET_HOST`, which
+  now already holds `host:port`, so Asterisk dialled an address that does not exist; it now reads
+  `AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST})`. Every compose file that defines the `platform-api`
+  environment sets `AgentAssist__AudioSocket__AdvertisedHost: auto`, and `docker-compose.full.yml` no longer
+  publishes `9092` on Asterisk, where nothing listens. The Helm chart takes `POD_IP` from `status.podIP`, sets the
+  advertised host from the new value `api.agentAssist.advertisedHost` (default `$(POD_IP)`), declares the audio port
+  as `containerPort` `aa-audio` from `api.agentAssist.audioSocketPort` (default `9093`).
+  `infra/k8s/manifests/network-policies.yaml` gains `allow-agentassist-audio`, which
+  admits TCP 9093 to `platform-api` from the `r55-asterisk` namespace; the `r55-platform` default-deny dropped that
+  connection before. `docker/docker-compose.scale.yml` sets `ConnectionStrings__Redis` on `platform-api` (the Redis
+  Realtime uses), so its replicas join the push backplane and Agent Assist results reach an agent on any replica.
+  Two new CI checks keep these in place: `scripts/check-scale-backplane.py` and `scripts/check-agentassist-k8s.py`.
+  Deepgram transcription is verified against a protocol fake only, not against Deepgram's live service; setup in
+  `docs/operations/agentassist-setup.md`.
+- New counters on `/metrics`: `platform_agentassist_call_claim_total{outcome}`,
+  `platform_agentassist_toggle_stale_total{path}` and `platform_agentassist_recognizer_unavailable_total{reason}`.
 - **A burst of sign-ins no longer stalls the rest of an Api replica.** Each password check (Argon2id, or BCrypt for a
   hash not yet migrated) is deliberate CPU work, and every sign-in ran its own at once on the shared thread pool: when a
   shift's agents all signed in within the same second, every pool thread was busy hashing and every other request on
@@ -262,10 +341,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     upgrade; nothing back-fills older rows (`CallAnalyticsQueueFilterLiveDbTests`).
 - **Pro `2.28.0-pro` reaches Platform** through the Agent Assist engine and the Redis push backplane the Api and
   Realtime register:
-  - The Agent Assist engine stays inert. The Api configures no AudioSocket advertised address, so with the runtime
-    toggle on each connected call stops before any snoop, ARI request or speech recognizer and is counted in
+  - The Agent Assist engine creates a snoop only with an advertised AudioSocket address, which the Api now sets from
+    `AgentAssist:AudioSocket:AdvertisedHost` (read **Fixed**). With none set, or `auto` finding no route, each connected
+    call with the runtime toggle on stops before any snoop, ARI request or speech recognizer and is counted in
     `agentassist.sessions.skipped` with `reason` `no_advertised_address`, with one Warning per engine lifetime. Before,
-    it created snoops that never produced a session (`AgentAssistInertOnMainTests`).
+    it created snoops that never produced a session.
   - Cross-node push events (agent, conversation and cluster state) reach the receiving node's event bus in publish
     order; before, two events from one node could reach it swapped (`PlatformPushRelayOrderLiveTests`). The order from
     that bus to SignalR clients is not asserted.
@@ -298,8 +378,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     executor's circuit state or its trip counter.
   - **Campaign outcomes are looked up on the node the call was dialed on.** The dialer's node id and the cluster's
     server key are the same string, so a single-node deployment finds the same calls (`DialerHostExtensionsTests`).
-  - Inert on Platform: the snoop filter at reconstruction (Platform creates no snoop), the RTP quality conversion (no
-    caller), a call's direction after a rebuild (unchanged), and the release's test-only and pin-only items.
+  - **A takeover does not rebuild an Agent Assist snoop as a call.** Now that the Api creates snoops (see above), a
+    `Snoop/` channel is no longer rebuilt as a call leg, and a linked id whose live channels are all snoops gets no
+    session; a takeover on an Agent Assist host rebuilds only the real calls.
+  - Inert on Platform: the RTP quality conversion (no caller), a call's direction after a rebuild (unchanged), and the
+    release's test-only and pin-only items.
 - **A paused `app_agent_pool` agent is a known limitation of Pro `2.29.0-pro`** (its "Known limitations" entry, Sdk
   #541), and the limitation stays: no Pro release fixes it. A later Pro release removes both the agent-state push
   bridge and the skill-based agent selector, after a separate Platform change stops registering the bridge. Platform
@@ -314,6 +397,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The Platform hub's seven client methods no longer take a `CancellationToken`. Platform has no C# caller of them.
   - The event store asks the host for a call-agent resolver; this release registers Platform's (#620), so no Warning
     is logged and an answered queue call's record names its agent. (#621)
+- **Verbara.Sdk.Pro `2.30.1-pro` → `2.30.2-pro`**, the 22 `Verbara.Sdk.Pro.*` pins in one commit, so an Agent Assist
+  snoop that enters its Stasis app after its create returned is no longer hung up. Before, the engine's first
+  set-variable on such a snoop answered 409 "Channel not in Stasis application" and the call went unassisted; now the
+  engine sends it again with a short backoff until the snoop enters, up to `ConnectionTimeout`. Only
+  `Verbara.Sdk.Pro.AgentAssist` changes, and no public member changes. Diffed by package name over every
+  `project.assets.json`, the restore moved only the 22 Pro packages. What reaches Platform:
+  - The Sdk logs each absorbed 409 at Warning (`[ARI_HTTP] Error response`). It is not a fault when it comes with an
+    `agentassist.snoop.stasis_wait` sample.
+  - A snoop that never enters its app ends the pair, counted in `agentassist.snoop.errors` with
+    `error.type=SnoopNeverEnteredStasisException`.
 - **The ASP.NET Core packages move together to `10.0.15`**: `Microsoft.AspNetCore.Authentication.JwtBearer` and
   `.OpenIdConnect` (`10.0.14`), `Microsoft.AspNetCore.DataProtection` and `.Extensions`, `Microsoft.AspNetCore.SignalR.Client`
   and `.Common`, `Microsoft.AspNetCore.Mvc.Testing`, `System.Security.Cryptography.Xml` and `.Pkcs` (`10.0.13`), and
@@ -327,9 +420,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Replaces #571.
 - **The Mail service no longer references `Azure.Identity`**, which no Mail code used (it authenticates against Azure AD
   with its own token request), and its central `1.21.0` pin goes with it, since no other project referenced it.
+- **A snoop channel no longer opens a call session** (Verbara.Sdk `2.10.1`, above). The Sdk session manager opens no
+  call for a snoop channel (`Snoop/…`), the tap Agent Assist puts on each call it serves: such a channel used to count
+  as a call of its own in the session metrics, the active-session counts and the call events that Pro's push, event
+  store and cluster consumers read. Conversations, agent presence and voice load were never affected
+  (`SnoopChannelSessionTests`, and the snoop cases of `VoiceConversationBridgeTests`).
 
 ### Upgrading
 
+- **A customised `[agentassist]` dialplan context must drop its port.** Each snoop's `AUDIOSOCKET_HOST` now holds
+  `host:port`, the address of the Api replica that created it. A context that still reads
+  `AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST}:9092)`, or adds any port, makes every snoop's address
+  unreachable and no call is transcribed. Copy the context of `docker/asterisk-config/extensions.conf` verbatim:
+  `exten => audiosocket,1,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST})` then `same => n,Hangup()`. Set
+  `AgentAssist__AudioSocket__AdvertisedHost` on every Api replica (`auto` in the shipped compose files, the pod IP in
+  the chart); without it no snoop is created. On Kubernetes, apply `allow-agentassist-audio` from
+  `infra/k8s/manifests/network-policies.yaml`, or Asterisk's connection to the audio port is dropped. With more than
+  one Api replica, set `ConnectionStrings__Redis` on every replica (the chart and `docker-compose.scale.yml` do).
+- **Match the node Stasis app by prefix.** A tool or alert that looked for `verbara-node` (or another
+  `Asterisk:Ari:NodeApplication`) by its exact name must match `verbara-node*`: each replica now registers it with its
+  machine name appended.
 - **Answered queue calls recorded before this release keep no agent** (#620). Records written while Platform
   registered no call-agent resolver, since the Verbara.Sdk.Pro `2.30.1-pro` pin (#621) or before, are not repaired,
   so `GET /api/v1/analytics/cdr?agent=` omits them. To count them, run on the event-store database
@@ -375,6 +485,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pending are not analysed.
 - **Read call-analysis saturation from `callanalytics.saturated`.** An operator dashboard or alert outside this repo
   that read saturation from `callanalytics.skipped.by_filter` must move to `callanalytics.saturated`.
+- **Migration `031` runs at start-up**: it adds two empty tables for Agent Assist, `agent_assist_feature_state` (the
+  deployment's one feature state, shared by every replica) and `agent_assist_call_claims` (one row per call with a live
+  Agent Assist session). Only new tables are created, so no existing table is locked or read. It is additive; a rollback
+  to the previous image leaves both tables unused.
 
 ## [2.39.1] - 2026-11-10
 

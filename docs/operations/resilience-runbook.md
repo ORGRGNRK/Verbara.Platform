@@ -118,10 +118,13 @@ For a clean ratio, the new v1.9.2+ release is planned to add `policy_executions_
 | `worker.audit-retention` | c3/120s + r1/2s + t20s | daily | yes |
 | `worker.realtime-state-bridge` | c5/60s + r2/500ms + t10s | event-driven | yes |
 | `worker.campaign-metrics-poller` | c5/60s + r2/500ms + t10s | variable | no (explicit logging) |
-| `worker.agent-assist-bridge` | c5/60s + r2/500ms + t10s | event-driven | yes |
 | `worker.timer-polling` | c5/60s + r2/500ms + t10s | 1s | yes |
 
 "Silent-swallow before v1.9.1" = the worker used to swallow exceptions without logging or metrics. After v1.9.1, all of these emit structured warnings + retry metrics.
+
+The Agent Assist bridge has no policy: each live event is published once, in order, and a failed publish is logged
+(`Error publishing … for session`) and not retried. A retry would put a live transcript line out of order and hand a
+second copy to the subscribers that had already received it.
 
 ---
 

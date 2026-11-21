@@ -120,6 +120,23 @@ public sealed class MigrationsFixture : IAsyncLifetime
         }
     }
 
+    /// <summary>The columns of the table's primary key, in key order; empty when it has none.</summary>
+    public async Task<IReadOnlyList<string>> PrimaryKeyColumnsAsync(string table)
+    {
+        await using var conn = await DataSource.OpenConnectionAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT a.attname FROM pg_index i " +
+            "CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) " +
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum " +
+            "WHERE i.indrelid = to_regclass(@Table) AND i.indisprimary ORDER BY k.ord";
+        cmd.Parameters.Add(new NpgsqlParameter("Table", table));
+        var columns = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) columns.Add(reader.GetString(0));
+        return columns;
+    }
+
     /// <summary>Returns true if a column exists in the named table.</summary>
     public async Task<bool> TableExistsAsync(string table)
     {

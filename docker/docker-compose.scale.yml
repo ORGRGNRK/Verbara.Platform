@@ -17,7 +17,11 @@
 #    per-replica RSA keys → tokens issued by replica A would reject on
 #    replica B.
 # 3. Activates the cross-replica auth cache pubsub via
-#    `ConnectionStrings:IdentityRedis=redis:6379`.
+#    `ConnectionStrings:IdentityRedis=redis:6379`, and puts every replica
+#    on the push backplane via `ConnectionStrings:Redis=redis:6379` (the
+#    Redis Realtime uses): the cross-replica push relay, the Agent Assist
+#    stream events served from any replica, and the shared Agent Assist
+#    live-session list. scripts/check-scale-backplane.py keeps it so.
 # 4. Drops the profile gate on the redis service so it runs by default
 #    with this override applied.
 # 5. Adds an nginx round-robin LB owning host:5000 → platform-api:5000.
@@ -50,6 +54,8 @@ services:
     ports: !reset []
     environment:
       # Inherits all values from full.yml; the keys below are merged in.
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      AgentAssist__AudioSocket__AdvertisedHost: auto
       Identity__JwtKeyRotation__UseRotationPool: "true"
       Identity__JwtKeyRotation__RequireRedisStore: "true"
       # v1.14.4 (MFA-007) — companion flag covering MFA + password-reset +
@@ -58,6 +64,12 @@ services:
       # cross-replica request handoff.
       Identity__RequireRedisIdentityCaches: "true"
       ConnectionStrings__IdentityRedis: redis:6379
+      # The push backplane (the value realtime carries in full.yml: same Redis, same asterisk:push:*
+      # channels). It turns on the Pro push relay, and with it the cross-replica Agent Assist stream
+      # (an agent's SSE stream and the Monitor list work from any replica) and the Redis live-session
+      # store. Without it each replica serves those from its own process. The redis depends_on below
+      # stays: the Redis client aborts the boot on a failed connect.
+      ConnectionStrings__Redis: redis:6379
       # nginx-lb fronts the replicas too: trust its fixed address as well as the gateway's
       # (TrustedProxies__0, from full.yml), or every LB client shares one address.
       ForwardedHeaders__TrustedProxies__1: ${VERBARA_LB_IP:-172.31.250.11}/32

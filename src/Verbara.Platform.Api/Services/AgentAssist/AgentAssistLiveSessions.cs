@@ -5,9 +5,10 @@ namespace Verbara.Platform.Api.Services.AgentAssist;
 
 /// <summary>
 /// One live Agent Assist session as the supervisor routes read it: its id, the one tenant that owns it (or
-/// <see langword="null"/> when none can be told) and its call. Internal, never serialized.
+/// <see langword="null"/> when none can be told), its call and the label of its latest caller sentiment reading (or
+/// <see langword="null"/> before the first one). Internal, never serialized.
 /// </summary>
-internal sealed record LiveAssistSession(string SessionId, string? OwnerTenant, CallSession? Call);
+internal sealed record LiveAssistSession(string SessionId, string? OwnerTenant, CallSession? Call, string? Sentiment = null);
 
 /// <summary>
 /// The live Agent Assist sessions of this process, seen through Platform. The Pro registry
@@ -42,8 +43,15 @@ internal sealed class AgentAssistLiveSessions : IAgentAssistLiveSessions
         if (_supervisor is null)
             return [];
 
-        return [.. _supervisor.ActiveSessions.Values.Select(s => ToLive(s.SessionId, s.CallSession, s.TenantId))];
+        return [.. _supervisor.ActiveSessions.Values.Select(s => ToLive(s.SessionId, s.CallSession, s.TenantId, LatestCallerSentimentOf(s)))];
     }
+
+    /// <summary>
+    /// The label of <paramref name="session"/>'s latest caller sentiment reading (<c>Positive</c>, <c>Neutral</c>,
+    /// <c>Negative</c>, <c>Frustrated</c>, <c>Escalating</c>), or <see langword="null"/> before the first one.
+    /// </summary>
+    internal static string? LatestCallerSentimentOf(AgentAssistSession session) =>
+        session.Context.LatestCallerSentiment?.Label.ToString();
 
     /// <inheritdoc />
     public bool TryWhisper(string sessionId, string text) =>
@@ -56,8 +64,8 @@ internal sealed class AgentAssistLiveSessions : IAgentAssistLiveSessions
     /// and the owner is <see cref="OwnerTenantOf"/> the call's tenant and the session's start-time
     /// <paramref name="sessionTenant"/>.
     /// </summary>
-    internal static LiveAssistSession ToLive(string sessionId, CallSession? call, string? sessionTenant) =>
-        new(sessionId, OwnerTenantOf(call?.TenantId, sessionTenant), call);
+    internal static LiveAssistSession ToLive(string sessionId, CallSession? call, string? sessionTenant, string? sentiment = null) =>
+        new(sessionId, OwnerTenantOf(call?.TenantId, sessionTenant), call, sentiment);
 
     /// <summary>
     /// The one tenant a live session's call and its start-time snapshot agree on: the call's when only it is set, the

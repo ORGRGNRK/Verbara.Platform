@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Verbara.Platform.Api.Endpoints.Shared;
 using Verbara.Platform.Api.Serialization;
+using Verbara.Platform.Api.Services.Push;
 using Verbara.Platform.Core;
 using Verbara.Platform.Core.Push;
 using Verbara.Platform.Identity;
@@ -29,6 +30,7 @@ internal static partial class SseEndpoints
         [FromServices] IAgentStore agentStore,
         [FromServices] LiveConnectionRegistry liveConnections,
         [FromServices] TimeProvider time,
+        [FromServices] CrossPodStreamFeed crossPodFeed,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
@@ -112,24 +114,10 @@ internal static partial class SseEndpoints
             FullMode = BoundedChannelFullMode.DropOldest
         });
 
-        using var subscription = eventBus.Events
-            // The revocation signal ends streams (via the registry above); it is never content.
-            .Where(e => e is not UserAccessRevokedEvent && deliveryFilter.IsDeliverableToSubscriber(
-                e,
-                tenantId is null
-                    // Anonymous / unscoped stream: align subscriber tenant to the event's so the
-                    // filter's tenant check passes; user-targeting still applies.
-                    ? subscriberContext with { TenantId = e.Metadata.TenantId }
-                    : subscriberContext)
-                // Conversation content reaches only its readers and the agents of its audience (design D17).
-                && ConversationContentDelivery.IsDeliverable(e, reader))
-            .Subscribe(evt =>
-            {
-                if (!channel.Writer.TryWrite(evt))
-                {
-                    LogEventBufferFull(logger, evt.Type);
-                }
-            });
+        // Local events and the events another replica published for the live streams (design D12) pass the same filter:
+        // the audience rule is one rule, applied to both sources.
+        using var subscription = SubscribeDeliverable(
+            StreamSource(eventBus, crossPodFeed), deliveryFilter, tenantId, subscriberContext, reader, logger, channel.Writer);
 
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(streamToken);
         var heartbeatTask = SendHeartbeatsAsync(context.Response, logger, heartbeatCts.Token);
@@ -166,6 +154,46 @@ internal static partial class SseEndpoints
             catch (OperationCanceledException) { /* expected */ }
             catch (Exception ex) { LogHeartbeatCleanupFailed(logger, ex); }
         }
+    }
+
+    /// <summary>
+    /// The events a live stream reads: the local bus merged with the events another replica published for the live
+    /// streams (design D12), or the local bus alone when no <paramref name="crossPodFeed"/> is registered.
+    /// </summary>
+    internal static IObservable<PlatformEvent> StreamSource(PlatformEventBus eventBus, CrossPodStreamFeed? crossPodFeed) =>
+        crossPodFeed is null ? eventBus.Events : eventBus.Events.Merge(crossPodFeed.Events);
+
+    /// <summary>
+    /// Subscribes one stream to <paramref name="source"/>: an event that passes the delivery filter and the conversation
+    /// content rule is written to <paramref name="writer"/>; the subscription ends the delivery.
+    /// </summary>
+    internal static IDisposable SubscribeDeliverable(
+        IObservable<PlatformEvent> source,
+        IEventDeliveryFilter deliveryFilter,
+        TenantId? tenantId,
+        SubscriberContext subscriberContext,
+        ConversationReaderClass? reader,
+        ILogger logger,
+        ChannelWriter<PlatformEvent> writer)
+    {
+        return source
+            // The revocation signal ends streams (via the registry above); it is never content.
+            .Where(e => e is not UserAccessRevokedEvent && deliveryFilter.IsDeliverableToSubscriber(
+                e,
+                tenantId is null
+                    // Anonymous / unscoped stream: align subscriber tenant to the event's so the
+                    // filter's tenant check passes; user-targeting still applies.
+                    ? subscriberContext with { TenantId = e.Metadata.TenantId }
+                    : subscriberContext)
+                // Conversation content reaches only its readers and the agents of its audience (design D17).
+                && ConversationContentDelivery.IsDeliverable(e, reader))
+            .Subscribe(evt =>
+            {
+                if (!writer.TryWrite(evt))
+                {
+                    LogEventBufferFull(logger, evt.Type);
+                }
+            });
     }
 
     private static async Task<bool> CanAuthenticateAsync(

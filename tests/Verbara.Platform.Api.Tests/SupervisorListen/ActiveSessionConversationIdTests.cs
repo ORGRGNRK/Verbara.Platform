@@ -4,8 +4,10 @@ using System.Text.Json.Nodes;
 using NSubstitute;
 using Verbara.Platform.Api.Endpoints;
 using Verbara.Platform.Api.Serialization;
+using Verbara.Platform.Api.Services.AgentAssist;
 using Verbara.Platform.Conversations;
 using Verbara.Platform.Core;
+using Verbara.Platform.Queues;
 using Verbara.Sdk.Enums;
 using Verbara.Sdk.Sessions;
 
@@ -20,6 +22,13 @@ public sealed class ActiveSessionConversationIdTests
 {
     private static readonly TenantId Caller = new("acme");
     private readonly IConversationStore _conversations = Substitute.For<IConversationStore>();
+    private readonly IAgentStore _agents = Substitute.For<IAgentStore>();
+
+    public ActiveSessionConversationIdTests() =>
+        _agents.GetByIdsAsync(Arg.Any<TenantId>(), Arg.Any<IReadOnlyCollection<EntityId>>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<Agent>());
+
+    private static LiveSessionRecord Live(string sessionId, CallSession? call) => LiveSessionRecord.Of(sessionId, Caller.Value, call);
 
     private static CallSession Call(string linkedId) => new($"s-{linkedId}", linkedId, "primary", CallDirection.Inbound)
     {
@@ -45,7 +54,7 @@ public sealed class ActiveSessionConversationIdTests
         var tracked = Tracked(Caller, "1712345678.40");
 
         var items = await SupervisorEndpoints.ToActiveSessionsAsync(
-            [("1712345678.42", Call("1712345678.40"))], Caller, _conversations, CancellationToken.None);
+            [Live("1712345678.42", Call("1712345678.40"))], Caller, _conversations, _agents, CancellationToken.None);
 
         var item = items.Should().ContainSingle().Subject;
         item.SessionId.Should().Be("1712345678.42");
@@ -61,10 +70,10 @@ public sealed class ActiveSessionConversationIdTests
 
         var items = await SupervisorEndpoints.ToActiveSessionsAsync(
         [
-            ("1712345699.07", Call("1712345699.01")),
-            ("1712345699.08", Call("1712345699.02")),
-            ("1712345699.09", null),
-        ], Caller, _conversations, CancellationToken.None);
+            Live("1712345699.07", Call("1712345699.01")),
+            Live("1712345699.08", Call("1712345699.02")),
+            Live("1712345699.09", null),
+        ], Caller, _conversations, _agents, CancellationToken.None);
 
         items.Select(i => i.ConversationId).Should().AllSatisfy(id => id.Should().BeNull());
         var json = JsonNode.Parse(JsonSerializer.Serialize(items, ApiJsonContext.Default.ActiveSessionDtoArray))!.AsArray();
@@ -74,15 +83,15 @@ public sealed class ActiveSessionConversationIdTests
     [Fact]
     public void ActiveSessionDto_ShouldMatchTheFrozenFixture_FieldForField()
     {
-        var fixture = SupervisorListenTestKit.Fixture("active-session.v1.json")["body"]!.AsArray();
+        var fixture = SupervisorListenTestKit.Fixture("active-session.v2.json")["body"]!.AsArray();
         var dtos = fixture.Select(n =>
         {
             var o = n!.AsObject();
             string? S(string name) => o[name]?.GetValue<string>();
             return new ActiveSessionDto(
-                S("sessionId")!, S("agentId"), S("queueName"), S("callerIdNum"),
+                S("sessionId")!, S("agentId"), S("agentName"), S("queueName"), S("callerIdNum"),
                 S("connectedAt") is { } at ? DateTimeOffset.Parse(at, CultureInfo.InvariantCulture) : null,
-                S("conversationId"));
+                S("conversationId"), S("sentiment"));
         }).ToArray();
 
         var json = JsonNode.Parse(JsonSerializer.Serialize(dtos, ApiJsonContext.Default.ActiveSessionDtoArray))!.AsArray();

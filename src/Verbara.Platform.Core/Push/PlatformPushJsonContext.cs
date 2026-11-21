@@ -49,4 +49,8 @@ namespace Verbara.Platform.Core.Push;
 [JsonSerializable(typeof(ConversationStateChangedEvent))]
 [JsonSerializable(typeof(TypificationSubmittedEvent))]
 [JsonSerializable(typeof(UserAccessRevokedEvent))]
+[JsonSerializable(typeof(AgentAssistSuggestionEvent))]
+[JsonSerializable(typeof(AgentAssistSentimentEvent))]
+[JsonSerializable(typeof(AgentAssistComplianceAlertEvent))]
+[JsonSerializable(typeof(AgentAssistTranscriptEvent))]
 public partial class PlatformPushJsonContext : JsonSerializerContext;

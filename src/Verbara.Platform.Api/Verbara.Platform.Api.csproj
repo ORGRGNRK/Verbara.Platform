@@ -42,6 +42,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Verbara.Platform.Api.Tests" />
+    <InternalsVisibleTo Include="Verbara.Platform.Api.Redis.Tests" />
+    <!-- The opt-in JIT benchmarks drive the live stream's shipped seams (agent-assist-works-end-to-end, design D15). -->
+    <InternalsVisibleTo Include="Verbara.Platform.Benchmarks" />
   </ItemGroup>
 
 <ItemGroup>

@@ -23,7 +23,7 @@ public sealed class InMemoryAgentAssistFeatureToggleTests
         {
             Enabled = true,
             Provider = "deepgram",
-            Deepgram = new AgentAssistProviderCredentials { ApiKey = "dg-seed-key" },
+            Deepgram = new AgentAssistDeepgramOptions { ApiKey = "dg-seed-key" },
         };
         var toggle = Create(options);
 

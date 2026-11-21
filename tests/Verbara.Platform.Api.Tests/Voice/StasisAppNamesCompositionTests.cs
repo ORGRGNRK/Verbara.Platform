@@ -2,7 +2,9 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
+using Verbara.Platform.Api.Services;
 using Verbara.Sdk.Pro.Cluster;
 
 namespace Verbara.Platform.Api.Tests.Voice;
@@ -54,7 +56,8 @@ public sealed class StasisAppNamesCompositionTests
             ["Asterisk:Ari:Application"] = "verbara",
         });
 
-        factory.PrimaryNode.Ari!.Application.Should().Be("verbara-node");
+        factory.PrimaryNode.Ari!.Application.Should().Be("verbara-node-" + Environment.MachineName,
+            "each replica's node client registers the node app followed by its own instance id");
     }
 
     [Fact]
@@ -67,7 +70,7 @@ public sealed class StasisAppNamesCompositionTests
             ["Asterisk:Ari:NodeApplication"] = "acme-cluster",
         });
 
-        factory.PrimaryNode.Ari!.Application.Should().Be("acme-cluster");
+        factory.PrimaryNode.Ari!.Application.Should().Be("acme-cluster-" + Environment.MachineName);
     }
 
     [Fact]
@@ -98,6 +101,40 @@ public sealed class StasisAppNamesCompositionTests
 
         factory.PrimaryNode.Ari.Should().BeNull("without Asterisk:Ari:BaseUrl the node has no ARI client");
     }
+
+    [Fact]
+    public void NodeOptions_ShouldFailNamingBothSettingsAndTheInstance_WhenTheEffectiveNodeAppEqualsTheApplication()
+    {
+        // The configured names differ, so the configured-name check passes; the replica's own app does not.
+        var configuration = Configuration("assist-node1", "assist");
+
+        var eager = () => StasisAppNames.NodeOptions(configuration, "node1");
+
+        eager.Should().Throw<InvalidOperationException>()
+            .Which.Message.Should().Contain("Asterisk:Ari:Application")
+            .And.Contain("Asterisk:Ari:NodeApplication")
+            .And.Contain("node1");
+    }
+
+    [Fact]
+    public void NodeOptions_ShouldRegisterThePerReplicaApp_WhenTheEffectiveNodeAppDiffersFromTheApplication()
+    {
+        var configuration = Configuration("assist-node1", "assist");
+
+        var options = StasisAppNames.NodeOptions(configuration, "node2");
+
+        options!.Application.Should().Be("assist-node2");
+        StasisAppNames.NodeInstance(configuration, "node2").Should().Be("assist-node2",
+            "the snoop app Agent Assist is given is the name the node client registers");
+    }
+
+    private static IConfiguration Configuration(string application, string nodeApplication) =>
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Asterisk:Ari:BaseUrl"] = AriBaseUrl,
+            ["Asterisk:Ari:Application"] = application,
+            ["Asterisk:Ari:NodeApplication"] = nodeApplication,
+        }).Build();
 
     private static IEnumerable<Exception> Chain(Exception? e)
     {

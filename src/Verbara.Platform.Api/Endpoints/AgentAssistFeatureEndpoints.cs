@@ -1,5 +1,7 @@
+using System.Diagnostics.CodeAnalysis;
 using Verbara.Platform.Api.Auth;
 using Verbara.Platform.Api.Services.AgentAssist;
+using Verbara.Platform.Api.Services.Speech;
 using Verbara.Platform.Audit;
 using Verbara.Platform.Core;
 using Verbara.Sdk.Pro.AgentAssist.Features;
@@ -24,10 +26,25 @@ namespace Verbara.Platform.Api.Endpoints;
 /// </remarks>
 internal static class AgentAssistFeatureEndpoints
 {
-    private static readonly HashSet<string> AllowedProviders = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>
+    /// Providers whose recognizer streams text while the call is still in progress, read from the
+    /// shared recognizer factory's table (the one a session's recognizer is built from). Only these
+    /// can be enabled: Agent Assist transcribes live calls.
+    /// </summary>
+    private static readonly string[] LiveProviders = [.. SpeechRecognizerFactory.MappedProviders
+        .Where(p => SpeechRecognizerFactory.TryGetMode(p, out var mode) && mode == SpeechRecognizerMode.Streaming)
+        .Order(StringComparer.Ordinal)];
+
+    /// <summary>
+    /// Providers whose recognizer returns text only after the audio stream ends — on a live call,
+    /// at hangup. They are refused with a message naming the reason.
+    /// </summary>
+    private static readonly HashSet<string> BatchProviders = new(StringComparer.Ordinal)
     {
-        "deepgram", "whisper", "azure-whisper", "google",
+        "whisper", "azure-whisper", "google",
     };
+
+    private static readonly string LiveProviderList = string.Join(", ", LiveProviders);
 
     /// <summary>The Platform-tenant gate with <c>features:agent-assist:manage</c>.</summary>
     internal static readonly AuthorizationPolicy ManagePolicy = new AuthorizationPolicyBuilder()
@@ -43,36 +60,37 @@ internal static class AgentAssistFeatureEndpoints
         group.MapPut("", UpdateFeature);
     }
 
+    // GET and PUT read the stored state directly, never the engine's cache, so a GET on any
+    // replica right after a PUT on another answers the new state.
     private static async Task<Ok<AgentAssistFeatureDto>> GetFeature(
-        [FromServices] IAgentAssistFeatureToggle toggle,
+        [FromServices] IAgentAssistFeatureStore toggle,
         CancellationToken ct)
     {
-        var state = await toggle.GetCurrentAsync(ct);
+        var state = await toggle.ReadAsync(ct);
         return TypedResults.Ok(ToDto(state));
     }
 
     private static async Task<Results<Ok<AgentAssistFeatureDto>, ValidationProblem>> UpdateFeature(
         HttpContext context,
         [FromBody] AgentAssistFeatureUpdateRequest body,
-        [FromServices] IAgentAssistFeatureToggle toggle,
+        [FromServices] IAgentAssistFeatureStore toggle,
         [FromServices] AgentAssistCredentialsProtector protector,
         [FromServices] ITenantStore tenantStore,
         [FromServices] IAuditService audit,
         [FromServices] IClock clock,
         CancellationToken ct)
     {
-        // Validate provider when enabling. Normalize first, then whitelist — ensures
+        // Validate provider when enabling. Normalize first, then check — ensures
         // the contract ("state.Provider is always lowercase") matches the check surface.
         string? normalizedProvider = null;
         if (body.Enabled)
         {
             var candidate = body.Provider?.Trim().ToLowerInvariant();
-            if (string.IsNullOrWhiteSpace(candidate)
-                || !AllowedProviders.Contains(candidate))
+            if (!IsLiveProvider(candidate, out var providerError))
             {
                 return TypedResults.ValidationProblem(new Dictionary<string, string[]>
                 {
-                    ["provider"] = ["Provider must be one of: deepgram, whisper, azure-whisper, google."],
+                    ["provider"] = [providerError],
                 });
             }
             normalizedProvider = candidate;
@@ -89,7 +107,18 @@ internal static class AgentAssistFeatureEndpoints
             }
         }
 
-        var previous = await toggle.GetCurrentAsync(ct);
+        // A present endpoint must be a WebSocket URI, whatever `enabled` says: the live
+        // recognizer connects to it as a WebSocket.
+        var endpoint = body.Credentials?.Endpoint?.Trim();
+        if (!string.IsNullOrEmpty(endpoint) && !IsWebSocketUri(endpoint))
+        {
+            return TypedResults.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["credentials"] = ["endpoint must be an absolute ws:// or wss:// URI."],
+            });
+        }
+
+        var previous = await toggle.ReadAsync(ct);
 
         // Encrypt credentials before they enter the toggle state
         IReadOnlyDictionary<string, string>? encrypted = null;
@@ -98,8 +127,8 @@ internal static class AgentAssistFeatureEndpoints
             var plain = new Dictionary<string, string>(StringComparer.Ordinal);
             if (!string.IsNullOrWhiteSpace(body.Credentials.ApiKey))
                 plain["apiKey"] = body.Credentials.ApiKey!;
-            if (!string.IsNullOrWhiteSpace(body.Credentials.Endpoint))
-                plain["endpoint"] = body.Credentials.Endpoint!;
+            if (!string.IsNullOrEmpty(endpoint))
+                plain["endpoint"] = endpoint;
             if (plain.Count > 0)
                 encrypted = protector.Protect(plain);
         }
@@ -157,22 +186,40 @@ internal static class AgentAssistFeatureEndpoints
             UpdatedBy: state.UpdatedBy);
     }
 
+    private static bool IsLiveProvider(
+        [NotNullWhen(true)] string? provider,
+        [NotNullWhen(false)] out string? error)
+    {
+        if (string.IsNullOrWhiteSpace(provider))
+        {
+            error = $"Provider is required when enabling. Live providers: {LiveProviderList}.";
+            return false;
+        }
+        if (LiveProviders.Contains(provider, StringComparer.Ordinal))
+        {
+            error = null;
+            return true;
+        }
+        error = BatchProviders.Contains(provider)
+            ? $"Provider '{provider}' cannot transcribe a live call: its recognizer returns text "
+              + $"only after the audio ends. Live providers: {LiveProviderList}."
+            : $"Provider must be one of: {LiveProviderList}.";
+        return false;
+    }
+
     private static string? ValidateCredentials(string provider, AgentAssistCredentialsDto creds)
     {
         return provider switch
         {
             "deepgram" => string.IsNullOrWhiteSpace(creds.ApiKey) ? "Deepgram requires apiKey." : null,
-            "whisper" => string.IsNullOrWhiteSpace(creds.ApiKey) ? "Whisper requires apiKey." : null,
-            "azure-whisper" =>
-                string.IsNullOrWhiteSpace(creds.ApiKey) || string.IsNullOrWhiteSpace(creds.Endpoint)
-                    ? "Azure Whisper requires both apiKey and endpoint."
-                    : null,
-            "google" => string.IsNullOrWhiteSpace(creds.ApiKey)
-                ? "Google requires apiKey (service-account JSON)."
-                : null,
             _ => "Unknown provider.",
         };
     }
+
+    private static bool IsWebSocketUri(string value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeWs || uri.Scheme == Uri.UriSchemeWss)
+        && !string.IsNullOrEmpty(uri.Host);
 }
 
 // ─── DTOs ─────────────────────────────────────────────────────────────────────

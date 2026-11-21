@@ -30,6 +30,8 @@ services:
   platform-api:
     image: ${IMAGE:-ghcr.io/verbara/platform/api:v2.4.0}
     environment:
+      # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
+      AgentAssist__AudioSocket__AdvertisedHost: auto
       ConnectionStrings__Postgres: "Host=postgres;Database=verbara_loadtest;Username=loadtest;Password=loadtest"
       ConnectionStrings__Redis: "redis:6379"
       Loadtest__SeedTenant: "true"

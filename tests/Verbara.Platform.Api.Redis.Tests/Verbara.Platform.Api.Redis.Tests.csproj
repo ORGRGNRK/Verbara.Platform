@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Api tests that need a real Redis: the backplane between two Api hosts and the shared Monitor list</Description>
+    <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+    <EnableSingleFileAnalyzer>false</EnableSingleFileAnalyzer>
+    <EnableAotAnalyzer>false</EnableAotAnalyzer>
+    <!-- Same as Verbara.Platform.Api.Tests: AD0001 is the RouteHandlerAnalyzer crashing on WebApplicationFactory hosts. -->
+    <NoWarn>$(NoWarn);IL2026;IL3050;AD0001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Verbara.Platform.Api\Verbara.Platform.Api.csproj" />
+    <!-- The content-delivery host and its stream probe (ContentDeliveryApiFactory, LiveStreamProbe) and the test doubles
+         of the Agent Assist suites. They stand on a chain of Api test hosts (ConversationOwnership, Impersonation,
+         AccountStatus, AuthenticatedPlatform), so the project is referenced rather than each file linked. Only this
+         assembly's tests run here. -->
+    <ProjectReference Include="..\Verbara.Platform.Api.Tests\Verbara.Platform.Api.Tests.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Testcontainers Redis fixture, linked (not referenced) from the Identity Redis suite. -->
+    <Compile Include="..\Verbara.Platform.Identity.Redis.Tests\RedisFixture.cs" Link="RedisFixture.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="NSubstitute" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Testcontainers" />
+    <PackageReference Include="StackExchange.Redis" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One Redis container for the whole assembly; its suites share it and run one after another. -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="FluentAssertions" />
+  </ItemGroup>
+
+</Project>

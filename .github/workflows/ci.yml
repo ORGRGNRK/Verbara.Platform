@@ -216,9 +216,10 @@ jobs:
           retention-days: 90
 
       - name: Unit tests
-        # Excludes ONLY the two genuinely container-backed test projects —
-        # Storage.Postgres.Tests (Postgres Testcontainer) and Identity.Redis.Tests
-        # (Redis) — which hard-fail without Docker. The filter targets each
+        # Excludes ONLY the genuinely container-backed test projects —
+        # Storage.Postgres.Tests (Postgres Testcontainer), Identity.Redis.Tests and
+        # Api.Redis.Tests (Redis) — which hard-fail without Docker. The substring
+        # "Api.Redis.Tests" matches no other test assembly name. The filter targets each
         # project's namespace PRECISELY rather than the bare tokens
         # "Postgres"/"Redis"/"Integration": those substrings also appear in
         # legitimate in-memory unit tests elsewhere (e.g. Api.Tests'
@@ -230,7 +231,7 @@ jobs:
         # [Category] trait (only one test in the whole suite is traited).
         run: >-
           dotnet test Verbara.Platform.slnx --no-build -c Release
-          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests"
+          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests&FullyQualifiedName!~Api.Redis.Tests"
           --logger "console;verbosity=normal"
           --blame-hang-timeout 5m --blame-hang-dump-type none --results-directory TestResults
       - name: Upload hang report
@@ -371,6 +372,15 @@ jobs:
           --no-build -c Release --logger "console;verbosity=normal"
           --blame-hang-timeout 5m --blame-hang-dump-type none --results-directory TestResults
 
+      - name: Live-DB tests — Api.Redis.Tests
+        # Two Api hosts and a Realtime-style echoer on one Redis Testcontainer: the Agent Assist backplane
+        # and the shared Monitor list. Dependabot CI-load skip as above, and for the same reason STEP-level.
+        if: github.event_name == 'merge_group' || github.event.pull_request.user.login != 'dependabot[bot]'
+        run: >-
+          dotnet test tests/Verbara.Platform.Api.Redis.Tests/Verbara.Platform.Api.Redis.Tests.csproj
+          --no-build -c Release --logger "console;verbosity=normal"
+          --blame-hang-timeout 5m --blame-hang-dump-type none --results-directory TestResults
+
       - name: Upload hang report
         # #428: --blame-hang-timeout aborts a test that runs 5 min without finishing and writes the sequence of
         # tests that ran (Sequence_*.xml; the hung test is the entry with Completed="False"). Uploaded only on failure.
@@ -441,7 +451,7 @@ jobs:
         # (Storage.Postgres / Identity.Redis) so the gate measures unit-tested code.
         run: >-
           dotnet test Verbara.Platform.slnx --no-build -c Release
-          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests"
+          --filter "FullyQualifiedName!~Storage.Postgres.Tests&FullyQualifiedName!~Identity.Redis.Tests&FullyQualifiedName!~Api.Redis.Tests"
           --collect:"XPlat Code Coverage" --settings coverlet.runsettings
           --results-directory ${{ github.workspace }}/coverage
           --blame-hang-timeout 5m --blame-hang-dump-type none
@@ -497,8 +507,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      - name: Install diff-cover (pinned)
-        run: pip install --disable-pip-version-check diff_cover==10.3.0
+      # PyYAML for the Agent Assist Kubernetes guard's tests (scripts/tests/test_check_agentassist_k8s.py).
+      - name: Install diff-cover and PyYAML (pinned)
+        run: pip install --disable-pip-version-check diff_cover==10.3.0 pyyaml==6.0.2
       - name: Run coverage-script unit tests
         run: python3 -m unittest discover scripts/tests
       # SMB reference stack pin guard (OpenSpec bump-smb-reference-stack-pins, design Decision 3): every
@@ -623,8 +634,9 @@ jobs:
   #      logged catches in this same change, so the floor is zero.
   #   #9 Program.cs (the Api composition root) may not grow past its frozen LOC
   #      budget — extract endpoint groups instead of growing the god-file.
-  # Cheap (~seconds, pure Python stdlib, no .NET). Guard logic is unit-tested in
-  # the coverage-scripts job (scripts/tests/test_check_endpoint_invariants.py).
+  # Cheap (~seconds, Python, no .NET). Guard logic is unit-tested in the
+  # coverage-scripts job (scripts/tests/test_check_*.py). The two Agent Assist
+  # deployment guards use the runner's Docker Compose v2 and Helm, and PyYAML.
   # This IS a required (merge-blocking) check: the main-protection ruleset requires the
   # "Invariant Gates" context (promoted 2026-07-20; verbara-meta/ADR-0012 G-013).
   invariant-gates:
@@ -636,3 +648,15 @@ jobs:
         uses: actions/checkout@v7
       - name: Endpoint invariant gates (empty-catch + LOC budgets)
         run: python3 scripts/check-endpoint-invariants.py
+      # Every compose pair that runs more than one platform-api replica puts each replica on the Redis push
+      # backplane (the same ConnectionStrings__Redis as realtime, a healthy redis dependency, redis not behind a
+      # profile). Reads the rendered merge (`docker compose config`), so an edit to either file is seen.
+      - name: Scale overlay backplane
+        run: python3 scripts/check-scale-backplane.py
+      - name: Install PyYAML (pinned)
+        run: pip install --disable-pip-version-check pyyaml==6.0.2
+      # Agent Assist audio on Kubernetes: the chart declares and advertises the audio port, every container port
+      # name is a valid (<= 15 character) name, the r55-platform NetworkPolicy admits the port from r55-asterisk,
+      # and platform-api and realtime render the same ConnectionStrings__Redis (`helm template`).
+      - name: Agent Assist Kubernetes audio path
+        run: python3 scripts/check-agentassist-k8s.py

@@ -161,6 +161,37 @@ internal sealed class LiveStreamProbe : IAsyncDisposable
                 $"{probe.Name}'s stream is subscribed, but its delivery filter refused the stream marker"));
     }
 
+    /// <summary>
+    /// Waits, on the reader's signal, until the frames received so far satisfy <paramref name="done"/>, for at most
+    /// <paramref name="timeout"/>. Returns whether they do.
+    /// </summary>
+    public async Task<bool> WaitForFramesAsync(Func<IReadOnlyList<SseFrame>, bool> done, TimeSpan timeout)
+    {
+        using var hang = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            Task changed;
+            lock (_frames)
+            {
+                if (done(_frames))
+                    return true;
+                if (_readerEnded)
+                    return false;
+                changed = _framesChanged.Task;
+            }
+
+            try
+            {
+                await changed.WaitAsync(hang.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                lock (_frames)
+                    return done(_frames);
+            }
+        }
+    }
+
     private async Task<bool> WaitForMarkerAsync(string marker, CancellationToken hang)
     {
         while (true)

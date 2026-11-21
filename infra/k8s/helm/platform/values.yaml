@@ -99,6 +99,17 @@ api:
       # The per-node ARI client's own Stasis app (Platform/ADR-0044): only the inbound-voice leader may
       # register `application`. Must differ from it, or the Api refuses to start; empty → "<application>-node".
       nodeApplication: verbara-node
+  # Agent Assist audio (AgentAssist:AudioSocket:*). Asterisk sends each snoop's audio straight to the replica
+  # whose engine created it, at the address that replica advertises; no Service fronts the port.
+  agentAssist:
+    # The address this replica advertises (AgentAssist__AudioSocket__AdvertisedHost). Default: the pod IP
+    # (POD_IP from status.podIP). Must name this replica only, never a Service: every replica of the
+    # Deployment gets the same value, so a literal address here is right only with one replica.
+    advertisedHost: "$(POD_IP)"
+    # The port the Api listens on for snoop audio (AgentAssist__AudioSocket__Port, containerPort aa-audio).
+    # infra/k8s/manifests/network-policies.yaml (allow-agentassist-audio) admits it from r55-asterisk;
+    # scripts/check-agentassist-k8s.py keeps the two in step.
+    audioSocketPort: 9093
   licensing:
     # DEPRECATED in Pro v2.4.0-pro; scheduled for removal in Pro v2.5.0-pro.
     # Set to "" (empty) to skip injection — Pro derives effective enforcement

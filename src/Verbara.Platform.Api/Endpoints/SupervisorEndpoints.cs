@@ -74,15 +74,17 @@ internal static class SupervisorEndpoints
         HttpContext context,
         [FromServices] IConversationStore conversations,
         [FromServices] IAgentStore agents,
-        [FromServices] IAgentAssistLiveSessions liveSessions,
+        [FromServices] IAgentAssistLiveSessionStore liveSessionStore,
         CancellationToken ct)
     {
         var tenantId = GetTenantId(context);
         if (await RefuseUnlessReadsAllAsync(context, tenantId, agents, ct) is { } refusal)
             return refusal;
 
-        var sessions = LiveSessionsOf(liveSessions, tenantId).Select(s => (s.SessionId, s.Call)).ToList();
-        return TypedResults.Ok(await ToActiveSessionsAsync(sessions, tenantId, conversations, ct));
+        // agent-assist-works-end-to-end (design D12): the records filed under the caller's tenant, shared by every replica
+        // when Redis is configured; this replica's own sessions otherwise.
+        var records = await liveSessionStore.ListAsync(tenantId.Value, ct);
+        return TypedResults.Ok(await ToActiveSessionsAsync(records, tenantId, conversations, agents, ct));
     }
 
     /// <summary>
@@ -99,32 +101,58 @@ internal static class SupervisorEndpoints
     /// <summary>
     /// supervisor-silent-listen (boundary gap 1, design D13): the active-session items, each with the id of the tracked
     /// voice conversation of its call in <paramref name="callerTenant"/> — resolved by the call's linked id, the same
-    /// lookup <c>AgentAssistBridge</c> runs — or null when none resolves there.
+    /// lookup <c>AgentAssistBridge</c> runs — or null when none resolves there. agent-assist-works-end-to-end (design
+    /// D13): each also names its agent's display name in <paramref name="callerTenant"/>, or null when the record has no
+    /// agent id or no agent row resolves there.
     /// </summary>
     internal static async Task<ActiveSessionDto[]> ToActiveSessionsAsync(
-        IReadOnlyList<(string SessionId, Verbara.Sdk.Sessions.CallSession? Call)> sessions,
+        IReadOnlyList<LiveSessionRecord> sessions,
         TenantId callerTenant,
         IConversationStore conversations,
+        IAgentStore agents,
         CancellationToken ct)
     {
+        var agentNames = await AgentNamesAsync(sessions, callerTenant, agents, ct);
         var dtos = new ActiveSessionDto[sessions.Count];
         for (var i = 0; i < sessions.Count; i++)
         {
-            var (sessionId, cs) = sessions[i];
+            var record = sessions[i];
             string? conversationId = null;
-            if (!string.IsNullOrEmpty(cs?.LinkedId))
-                conversationId = (await conversations.FindByVoiceLinkedIdAsync(callerTenant, cs.LinkedId, ct))?.ConversationId.Value;
+            if (!string.IsNullOrEmpty(record.LinkedId))
+                conversationId = (await conversations.FindByVoiceLinkedIdAsync(callerTenant, record.LinkedId, ct))?.ConversationId.Value;
 
             dtos[i] = new ActiveSessionDto(
-                SessionId: sessionId,
-                AgentId: cs?.AgentId,
-                QueueName: cs?.QueueName,
-                CallerIdNum: cs?.CallerIdNum,
-                ConnectedAt: cs?.ConnectedAt,
-                ConversationId: conversationId);
+                SessionId: record.SessionId,
+                AgentId: record.AgentId,
+                AgentName: record.AgentId is { } agentId ? agentNames.GetValueOrDefault(agentId) : null,
+                QueueName: record.QueueName,
+                CallerIdNum: record.CallerIdNum,
+                ConnectedAt: record.ConnectedAt,
+                ConversationId: conversationId,
+                Sentiment: record.Sentiment);
         }
 
         return dtos;
+    }
+
+    /// <summary>The display name of each agent the records name, read in <paramref name="callerTenant"/> in one query.</summary>
+    private static async Task<Dictionary<string, string>> AgentNamesAsync(
+        IReadOnlyList<LiveSessionRecord> sessions, TenantId callerTenant, IAgentStore agents, CancellationToken ct)
+    {
+        var ids = sessions
+            .Select(s => s.AgentId)
+            .Where(EntityId.IsValid)
+            .Distinct(StringComparer.Ordinal)
+            .Select(id => EntityId.From(id!))
+            .ToArray();
+        if (ids.Length == 0)
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+
+        var rows = await agents.GetByIdsAsync(callerTenant, ids, ct);
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var agent in rows.Where(a => a.TenantId == callerTenant))
+            names[agent.AgentId.Value] = agent.DisplayName;
+        return names;
     }
 
     private static IResult PostWhisper(
@@ -593,15 +621,19 @@ internal static class SupervisorListenStore
 
 // ─── DTOs ─────────────────────────────────────────────────────────────────────
 
-// supervisor-silent-listen (fixtures/active-session.v1.json): every member is always written; conversationId is the
-// tracked voice conversation of the session's call in the caller's tenant, or null.
+// agent-assist-works-end-to-end (fixtures/active-session.v2.json, design D13): every member is always written.
+// agentId is the agent the session's live events name, agentName its display name in the caller's tenant,
+// conversationId the tracked voice conversation of the session's call in the caller's tenant and sentiment the label of
+// the session's latest caller sentiment reading; each is null when unknown.
 internal sealed record ActiveSessionDto(
     string SessionId,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? AgentId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? AgentName,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? QueueName,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? CallerIdNum,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] DateTimeOffset? ConnectedAt,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? ConversationId);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? ConversationId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Sentiment);
 
 internal sealed record WhisperRequest(string Text);
 
