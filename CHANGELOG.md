@@ -21,6 +21,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Holiday-calendar and caller-ID-pool contents stay in their tenant.** The holiday routes of a holiday calendar and
+  the entry routes of a caller-ID pool answer 404 and change nothing when the calendar or pool belongs to another
+  tenant; on the tenant's own calendar or pool they answer as before. The OpenAPI document declares the 404 on the
+  six operations.
 - **Live updates and API calls accept a new signing key on its first request.** On a fresh install, Realtime (and an
   Api replica that did not sign the token) refused the admin's first live-update connects for up to 30 s after setup
   finished: the requests that reached it before the first signing key existed were counted as failed key reads, and
