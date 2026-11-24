@@ -1,4 +1,5 @@
 using Verbara.Platform.Api.Endpoints.Shared;
+using Verbara.Platform.Api.OpenApi;
 using Verbara.Platform.Api.Services;
 using Verbara.Platform.Audit;
 using Verbara.Platform.Core;
@@ -20,7 +21,13 @@ internal static class ManagementTenantEndpoints
         group.MapGet("/{id}", GetTenant);
         group.MapPost("/", CreateTenant)
             .Produces<MgmtTenantDto>(StatusCodes.Status201Created)
-            .Produces<PlanAboveParentRefusal>(StatusCodes.Status409Conflict);
+            .Produces<ErrorResponse>(StatusCodes.Status400BadRequest)
+            // 409: an unavailable tenant id (ErrorResponse, realtime-objects-stay-in-their-tenant design D1) or a plan
+            // above the parent's (PlanAboveParentRefusal). ApiExplorer keeps one type per status, so the document's
+            // oneOf comes from the marker below.
+            .Produces<PlanAboveParentRefusal>(StatusCodes.Status409Conflict)
+            .WithMetadata(new AlternativeResponseBodies(StatusCodes.Status409Conflict,
+                typeof(ErrorResponse), typeof(PlanAboveParentRefusal)));
         group.MapPut("/{id}", UpdateTenant)
             .Produces<PlanAboveParentRefusal>(StatusCodes.Status409Conflict);
         group.MapPost("/{id}/suspend", SuspendTenant);
@@ -81,13 +88,19 @@ internal static class ManagementTenantEndpoints
         HttpContext context,
         [FromBody] CreateMgmtTenantRequest body,
         [FromServices] ITenantStore store,
+        [FromServices] ITenantIdRegistry tenantIds,
         [FromServices] IAuditService audit,
-        [FromServices] IEnumerable<ITenantLifecycleHandler> lifecycleHandlers,
+        [FromServices] ITenantLifecycleDispatcher lifecycle,
         CancellationToken ct)
     {
         // Validate type
         if (body.Type is not (TenantType.Customer or TenantType.Partner))
             return Results.BadRequest(new ErrorResponse("Type must be Customer or Partner."));
+
+        // The tenant-id rule (design D1), on the id as sent; the overlap is checked atomically by the registry below,
+        // which also refuses an existing id instead of overwriting it.
+        if (!TenantIdRule.IsWellFormed(body.TenantId) || TenantIdRule.IsReserved(body.TenantId))
+            return Results.BadRequest(new ErrorResponse(TenantIdRefusal.Malformed));
 
         // Resolve parent
         var parentId = body.ParentTenantId;
@@ -170,8 +183,9 @@ internal static class ManagementTenantEndpoints
             UpdatedAt = DateTimeOffset.UtcNow,
         };
 
-        await store.UpsertAsync(tenant, ct);
-        await DispatchLifecycleAsync(lifecycleHandlers, h => h.OnTenantCreatedAsync(tenant, ct));
+        if (await tenantIds.TryCreateAsync(tenant, ct) == TenantCreateResult.Conflict)
+            return Results.Conflict(new ErrorResponse(TenantIdRefusal.Unavailable(tenant.TenantId)));
+        await lifecycle.CreatedAsync(tenant, ct);
         await audit.RecordAsync(
             new TenantId(tenant.TenantId), category: "admin", action: "tenant.created", severity: "warning",
             actorId: context.User.FindFirst("sub")?.Value ?? "system", actorType: "user",
@@ -265,8 +279,7 @@ internal static class ManagementTenantEndpoints
         HttpContext context,
         [FromServices] ITenantStore store,
         [FromServices] IAuditService audit,
-        [FromServices] IEnumerable<ITenantLifecycleHandler> lifecycleHandlers,
-        [FromServices] ILogger<Program> logger,
+        [FromServices] ITenantLifecycleDispatcher lifecycle,
         CancellationToken ct)
     {
         var tenant = await store.GetAsync(id, ct);
@@ -275,7 +288,7 @@ internal static class ManagementTenantEndpoints
             return TypedResults.BadRequest(new ErrorResponse("Cannot suspend the Platform tenant."));
 
         await store.UpdateStatusAsync(id, TenantStatus.Suspended, ct);
-        await DispatchLifecycleAsync(lifecycleHandlers, h => h.OnTenantSuspendedAsync(id, ct), logger);
+        await lifecycle.SuspendedAsync(id, ct);
         await audit.RecordAsync(
             new TenantId(id), category: "admin", action: "tenant.suspended", severity: "warning",
             actorId: context.User.FindFirst("sub")?.Value ?? "system", actorType: "user",
@@ -321,8 +334,7 @@ internal static class ManagementTenantEndpoints
         [FromServices] ITenantStore store,
         [FromServices] IAgentStore agents,
         [FromServices] IAuditService audit,
-        [FromServices] IEnumerable<ITenantLifecycleHandler> lifecycleHandlers,
-        [FromServices] ILogger<Program> logger,
+        [FromServices] ITenantLifecycleDispatcher lifecycle,
         CancellationToken ct)
     {
         var tenant = await store.GetAsync(id, ct);
@@ -347,7 +359,7 @@ internal static class ManagementTenantEndpoints
 
         // UpdateStatusAsync throws if active children exist
         await store.UpdateStatusAsync(id, TenantStatus.Deleted, ct);
-        await DispatchLifecycleAsync(lifecycleHandlers, h => h.OnTenantDeletedAsync(id, ct), logger);
+        await lifecycle.DeletedAsync(id, ct);
         await audit.RecordAsync(
             new TenantId(id), category: "admin", action: "tenant.deleted", severity: "critical",
             actorId: context.User.FindFirst("sub")?.Value ?? "system", actorType: "user",
@@ -366,26 +378,6 @@ internal static class ManagementTenantEndpoints
         new(t.TenantId, t.Name, t.Status.ToString(), t.Type.ToString(),
             t.ParentTenantId, t.Options.MaxConcurrentChannels,
             t.Options.MaxActiveCampaigns, t.Metadata, t.CreatedAt, t.UpdatedAt);
-
-    private static async Task DispatchLifecycleAsync(
-        IEnumerable<ITenantLifecycleHandler> handlers,
-        Func<ITenantLifecycleHandler, ValueTask> action,
-        ILogger? logger = null)
-    {
-        foreach (var handler in handlers)
-        {
-            try
-            {
-                await action(handler);
-            }
-            catch (Exception ex)
-            {
-#pragma warning disable CA1848
-                logger?.LogWarning(ex, "Lifecycle handler {Handler} failed", handler.GetType().Name);
-#pragma warning restore CA1848
-            }
-        }
-    }
 }
 
 // ─── DTOs ─────────────────────────────────────────────────────────────────────
