@@ -1,6 +1,7 @@
 using Verbara.Platform.Api.Services;
 using Verbara.Platform.Core;
 using Verbara.Platform.Queues;
+using Verbara.Platform.Storage.InMemory;
 using Verbara.Sdk.Pro.Dialer.Models;
 using Verbara.Sdk.Pro.Dialer.Routing;
 using Microsoft.Extensions.Configuration;
@@ -27,7 +28,7 @@ public sealed class PlatformDesiredStateProviderTests
             .AddInMemoryCollection(_configData!)
             .Build();
 
-        var skillCatalog = new Verbara.Sdk.Pro.Routing.Skills.InMemorySkillCatalog();
+        var skillCatalog = new InMemorySkillCatalogStore(_agentStore);
         _membershipService = new QueueMembershipService(
             _queueStore, _agentStore, skillCatalog, _membershipStore,
             NullLogger<QueueMembershipService>.Instance);

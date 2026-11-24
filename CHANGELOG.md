@@ -9,6 +9,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Routing skills stay in their tenant, and survive a restart.** Skill definitions and agent skill proficiencies are
+  kept per tenant in the database: each tenant's administrators see and change only their own, the agent skill routes
+  answer 404 for an agent of another tenant, and assigning or removing an agent's skill is recorded in the audit log.
+  The catalog is now the same on every Api replica and is kept across restarts; it starts empty at upgrade, as it did
+  after any restart, so no queue penalty changes. The OpenAPI document declares the 404 on the three agent skill
+  operations, and now declares the success codes these routes already return: 201 with the assignment when a skill is
+  assigned, 204 when one is removed (it declared 200 for both).
+
 ## [2.41.1] - 2026-11-24
 
 Suspending, deleting or reconciling a tenant no longer touches another tenant's realtime telephony rows, and a new
