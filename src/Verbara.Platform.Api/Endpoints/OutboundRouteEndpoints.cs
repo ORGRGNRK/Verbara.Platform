@@ -69,6 +69,10 @@ internal static class OutboundRouteEndpoints
             Priority = body.Priority,
         };
         var id = await routeStore.CreateAsync(route, tenantId, ct);
+        // Pro's store writes no row and answers 0 when a trunk is not the tenant's at the write (Pro 2.33.0-pro): after
+        // the check above, only a trunk deleted in between. No route exists, so there is nothing to answer or audit.
+        if (id == 0)
+            return TypedResults.BadRequest(new ErrorResponse("trunkId or overflowTrunkId is not a trunk of this tenant"));
         route.Id = id;
         await audit.RecordAsync(
             new TenantId(tenantId), category: "config", action: "outbound_route.created", severity: "info",
@@ -121,6 +125,14 @@ internal static class OutboundRouteEndpoints
         if (body.Priority.HasValue) route.Priority = body.Priority.Value;
 
         await routeStore.UpdateAsync(route, tenantId, ct);
+        // Pro's store changes no row, and says nothing, when a new trunk is not the tenant's at the write (Pro
+        // 2.33.0-pro): after the check above, only a trunk deleted in between. Read the route back so a write that did
+        // not happen is neither answered as done nor audited.
+        var stored = await routeStore.GetAsync(id, tenantId, ct);
+        if (stored is null)
+            return TypedResults.NotFound();
+        if (stored.TrunkId != route.TrunkId || stored.OverflowTrunkId != route.OverflowTrunkId)
+            return TypedResults.BadRequest(new ErrorResponse("trunkId or overflowTrunkId is not a trunk of this tenant"));
         await audit.RecordAsync(
             new TenantId(tenantId), category: "config", action: "outbound_route.updated", severity: "info",
             actorId: context.User.FindFirst("sub")?.Value ?? "system", actorType: "user",
