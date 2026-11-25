@@ -9,6 +9,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Asterisk in the full stack and the demo stack loads its endpoints, queues and trunks again.** Asterisk read its
+  configuration from a database the stack does not create (`platform` instead of `verbara` in
+  `docker/docker-compose.full.yml`) and with a password the stack does not use (the demo stack's, and any stack started
+  with its own `POSTGRES_PASSWORD`), so `pjsip show endpoints` answered "No objects found" and no call could reach an
+  agent. Both stacks now hand Asterisk the database, user and password of their own Postgres, as the reference SMB
+  stack already did. Asterisk's container now also writes a database name, user or password that holds `/`, `&`,
+  `\`, `;`, a quote or a space exactly as given; before, such a password was dropped or mangled. A new CI check,
+  `scripts/check-asterisk-realtime.py`, fails when a stack under `docker/` that builds Asterisk points it at another
+  database, user or password than its Postgres.
+
 ### Dependencies
 
 - **The Api no longer references `Verbara.Sdk.Pro.Routing`.** No Platform code used the package: inbound routing,
