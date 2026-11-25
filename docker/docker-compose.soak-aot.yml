@@ -32,7 +32,10 @@ services:
     environment:
       # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
       AgentAssist__AudioSocket__AdvertisedHost: auto
-      ConnectionStrings__Postgres: "Host=postgres;Database=verbara_loadtest;Username=loadtest;Password=loadtest"
+      ConnectionStrings__Postgres: "Host=postgres;Database=verbara_loadtest;Username=loadtest"
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: "loadtest"
       ConnectionStrings__Redis: "redis:6379"
       Loadtest__SeedTenant: "true"
       ASPNETCORE_URLS: "http://+:8080"

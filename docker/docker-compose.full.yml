@@ -77,7 +77,10 @@ services:
       # Agent Assist: each replica tells Asterisk its own address for snoop audio (route to the ARI host).
       AgentAssist__AudioSocket__AdvertisedHost: auto
       ASPNETCORE_ENVIRONMENT: Production
-      ConnectionStrings__Postgres: Host=postgres;Database=verbara;Username=platform;Password=${POSTGRES_PASSWORD:-platform_secret}
+      ConnectionStrings__Postgres: Host=postgres;Database=verbara;Username=platform
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: ${POSTGRES_PASSWORD:-platform_secret}
       Asterisk__Ami__Hostname: asterisk
       Asterisk__Ami__Port: "5038"
       Asterisk__Ami__Username: platform
@@ -169,7 +172,10 @@ services:
       # Leader election reads Cluster, falling back to Postgres. Without either, startup throws
       # "ConnectionStrings:Cluster (or :Postgres fallback) is required for leader election" and the
       # container crash-loops. Same database platform-api uses.
-      ConnectionStrings__Postgres: Host=postgres;Database=verbara;Username=platform;Password=${POSTGRES_PASSWORD:-platform_secret}
+      ConnectionStrings__Postgres: Host=postgres;Database=verbara;Username=platform
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: ${POSTGRES_PASSWORD:-platform_secret}
       # Pro.Push Redis backplane + SignalR backplane share the same Redis.
       # NOT optional: StackExchange.Redis aborts on connect failure, so a realtime container that
       # cannot reach Redis dies at Host.StartAsync. Redis is therefore a default service with a
@@ -201,7 +207,10 @@ services:
     logging: *default-logging
     environment:
       ASPNETCORE_URLS: http://+:5020
-      ConnectionStrings__Postgres: Host=postgres;Database=verbara;Username=platform;Password=${POSTGRES_PASSWORD:-platform_secret}
+      ConnectionStrings__Postgres: Host=postgres;Database=verbara;Username=platform
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: ${POSTGRES_PASSWORD:-platform_secret}
       Smtp__Host: ${SMTP_HOST:-localhost}
       Smtp__Port: ${SMTP_PORT:-587}
       Smtp__UseTls: ${SMTP_USE_TLS:-false}

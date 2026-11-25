@@ -99,10 +99,13 @@ services:
       # / OSS mode → Pro endpoints return HTTP 402 + ProblemDetails, free
       # endpoints unaffected. Set Licensing__LicenseFilePath to /etc/verbara/license.lic
       # + mount the .lic via secret to unlock Pro features.
-      ConnectionStrings__Postgres: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform;Password=${POSTGRES_PASSWORD:-platform_demo}
-      ConnectionStrings__Cluster: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform;Password=${POSTGRES_PASSWORD:-platform_demo}
-      ConnectionStrings__Analytics: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform;Password=${POSTGRES_PASSWORD:-platform_demo}
-      ConnectionStrings__Dialer: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform;Password=${POSTGRES_PASSWORD:-platform_demo}
+      ConnectionStrings__Postgres: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform
+      ConnectionStrings__Cluster: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform
+      ConnectionStrings__Analytics: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform
+      ConnectionStrings__Dialer: Host=postgres;Database=${POSTGRES_DB:-platform};Username=platform
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: ${POSTGRES_PASSWORD:-platform_demo}
       Asterisk__Ami__Hostname: asterisk
       Asterisk__Ami__Port: "5038"
       Asterisk__Ami__Username: platform

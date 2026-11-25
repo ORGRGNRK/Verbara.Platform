@@ -169,7 +169,10 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:5000
       # Postgres on the same docker network → resolves via service DNS.
-      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-verbara};Username=${POSTGRES_USER:-platform};Password=${POSTGRES_PASSWORD};Maximum Pool Size=${PG_POOL_MAX:-10};Minimum Pool Size=${PG_POOL_MIN:-2};Connection Idle Lifetime=300;Pooling=true"
+      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-verbara};Username=${POSTGRES_USER:-platform}"
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
       # Asterisk on host network → reach via host gateway.
       Asterisk__Ami__Hostname: host.docker.internal
       Asterisk__Ami__Port: "5038"
@@ -294,7 +297,10 @@ services:
       Asterisk__ClusterNodeId: ${REALTIME_CLUSTER_NODE_ID:-realtime-1}
       # Postgres-backed leader election (REQUIRED since v2.8.0 — realtime hard-fails
       # at startup without ConnectionStrings:Cluster or :Postgres). Single-host = sole leader.
-      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-verbara};Username=${POSTGRES_USER:-platform};Password=${POSTGRES_PASSWORD};Maximum Pool Size=5;Minimum Pool Size=1;Pooling=true"
+      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-verbara};Username=${POSTGRES_USER:-platform}"
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
       # Live-event backplane + the API's JWT key pool. Required: without the
       # identity Redis, realtime rejects every token the API issues.
       ConnectionStrings__Redis: "redis:6379${REDIS_PASSWORD:+,password=${REDIS_PASSWORD}}"
@@ -506,7 +512,10 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:5020
-      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-verbara};Username=${POSTGRES_USER:-platform};Password=${POSTGRES_PASSWORD}"
+      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-verbara};Username=${POSTGRES_USER:-platform}"
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
       Smtp__Host: ${SMTP_HOST:-localhost}
       Smtp__Port: ${SMTP_PORT:-587}
       Smtp__UseTls: ${SMTP_USE_TLS:-true}

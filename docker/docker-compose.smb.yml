@@ -51,7 +51,10 @@ services:
       # 14 stores. ConnectionStringDefaults in Program.cs would apply the
       # same defaults if absent — specifying here is belt-and-suspenders
       # + makes the tuning visible in operator-facing config.
-      ConnectionStrings__Postgres: "Host=postgres;Database=verbara;Username=platform;Password=${POSTGRES_PASSWORD:-platform_secret};Maximum Pool Size=10;Minimum Pool Size=2;Connection Idle Lifetime=300;Pooling=true"
+      ConnectionStrings__Postgres: "Host=postgres;Database=verbara;Username=platform"
+      # The password travels as PGPASSWORD, which Npgsql reads from the environment; it is
+      # never pasted into the connection string, where ';', quotes and spaces corrupt it.
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
 
   postgres:
     # ADR-0015 Phase 2 — max_connections=200 is operator headroom over the
